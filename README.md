@@ -5,9 +5,27 @@ persistent queue for upscaling and variation jobs.  Browse your existing Fooocus
 outputs, select an image, choose an operation, and submit — jobs run one at a time in
 the background while you continue adding more.
 
-> **Rationale**
->
-> *(To be filled in.)*
+**Rationale**
+I just got started working with Fooocus and found trying to queue items up for Upscaling
+to run during the night while I was asleep (so my time while awake could be spent 
+generating new images) to be tedious -- opening window after window, copy/pasting data, 
+making sure I picked the right image, and trying to remember to set the generated image 
+count down to 1, turn off random, and set the correct seed.
+
+I considered scripting it but the Gradio API that runs Fooocus is the absolute worst
+nightmarish mystery box API I've ever seen in my life.  It's so terrible that there's a
+major project that just provides a RESTful API for it instead (Fooocus-API).
+Unfortunately, Fooocus-API is a full fork of Fooocus, not just an API plugin or translation
+layer.  I wasn't eager to have to copy all my models again into another spot, just to be
+able to have reasonable API access.
+
+Then...it was fate.  My boss started a major company initiative to adopt Claude Code and
+use it to make ourselves more productive and nimble. I was specifically told I should
+try it out for personal projects, just so long as I gained experience and enthusiasm.
+Two nights later, and I actually have a really useful tool that can queue up all the 
+upscaling actions I want in a single place, and I don't have to look up the prompts, RNG 
+seeds, and image filenames from the log file myself.
+
 
 ---
 
@@ -62,7 +80,8 @@ Then open **http://localhost:7860** in your browser.
 **3. Browse and select an image**
 
 The gallery shows images from your Fooocus output folder, newest first.  Click an image
-to select it; its prompt and seed are read automatically from Fooocus's `log.html`.
+to select it; its prompt, seed, and performance setting are read automatically from
+Fooocus's `log.html`.
 
 **4. Choose an operation**
 
@@ -74,7 +93,21 @@ to select it; its prompt and seed are read automatically from Fooocus's `log.htm
 | Vary (Subtle) | Small creative variation |
 | Vary (Strong) | Larger creative variation |
 
-**5. Submit**
+**5. Choose a performance preset**
+
+The Performance radio is pre-set to match the setting used when the original image was
+generated.  You can change it before submitting if you want a different quality/speed
+trade-off for this particular job.
+
+| Preset | Description |
+|---|---|
+| Speed | Balanced quality and generation time (Fooocus default) |
+| Quality | Higher quality, slower generation |
+| Extreme Speed | Very fast, lower quality |
+| Lightning | Fastest preset |
+| Hyper-SD | Alternative fast preset |
+
+**6. Submit**
 
 Click **Submit for Upscaling**.  The job appears in the queue table with status
 `queued`.  It moves to `processing` when Fooocus starts generating and to `done` when
