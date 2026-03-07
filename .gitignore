@@ -1,0 +1,17 @@
+# Local environment — contains real paths; never commit
+.env
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Runtime data — machine-specific, starts empty on each clone
+queue.json
+
+# Claude workspace
+.claude/
+
+# Stray pip artifact
+=10.0

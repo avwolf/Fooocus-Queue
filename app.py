@@ -1,0 +1,226 @@
+"""
+Fooocus Upscale Queue — Gradio companion app.
+
+Run with:  python app.py
+Then open:  http://localhost:7860
+"""
+from __future__ import annotations
+
+import re
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import gradio as gr
+
+from config import load_config
+from fooocus_client import (
+    SubmittedJob,
+    UovMethod,
+    create_client,
+    get_job_status,
+    submit_upscale_job,
+)
+from log_parser import LogParseError, parse_log
+from queue_manager import QueueEntry, QueueManager
+
+# ---------------------------------------------------------------------------
+# App-level singletons
+# ---------------------------------------------------------------------------
+
+DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DAYS_PER_PAGE = 3  # how many date-dirs to load initially and per "load more" click
+
+config = load_config()
+fooocus = create_client(config.fooocus_url)
+queue = QueueManager(config.queue_file)
+
+UOV_OPTIONS = [m.value for m in UovMethod]
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+
+def get_date_dirs(outputs_root: Path) -> list[Path]:
+    """Return all YYYY-MM-DD subdirs sorted newest first."""
+    return sorted(
+        [d for d in outputs_root.iterdir() if d.is_dir() and DATE_DIR_RE.match(d.name)],
+        reverse=True,
+    )
+
+
+def images_for_dirs(date_dirs: list[Path]) -> list[str]:
+    """Return image paths from the given date dirs, newest first within each dir."""
+    images: list[Path] = []
+    for date_dir in date_dirs:
+        for ext in ("*.png", "*.jpg", "*.webp"):
+            images.extend(sorted(date_dir.glob(ext), reverse=True))
+    return [str(p) for p in images]
+
+
+def _load_more_label(loaded: int, total: int) -> str:
+    remaining = total - loaded
+    if remaining <= 0:
+        return "All days loaded"
+    return f"Load {DAYS_PER_PAGE} more days ({remaining} remaining)"
+
+
+def _start_polling(submitted: SubmittedJob) -> None:
+    """Background thread: poll job status every 2 s until terminal."""
+    def poll() -> None:
+        while True:
+            time.sleep(2)
+            status = get_job_status(submitted)
+            queue.update_status(submitted.job_id, status)
+            if status in ("done", "failed"):
+                break
+
+    threading.Thread(target=poll, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Gradio event handlers
+# ---------------------------------------------------------------------------
+
+
+def on_load_more(all_dirs: list, loaded_count: int):
+    """Load the next batch of date dirs into the gallery."""
+    new_count = min(loaded_count + DAYS_PER_PAGE, len(all_dirs))
+    paths = images_for_dirs(all_dirs[:new_count])
+    btn = gr.update(
+        value=_load_more_label(new_count, len(all_dirs)),
+        interactive=(new_count < len(all_dirs)),
+    )
+    return paths, paths, new_count, btn
+
+
+def on_image_select(evt: gr.SelectData, original_paths: list):
+    """Populate metadata fields when an image is clicked in the gallery.
+
+    We index into `original_paths` (a gr.State holding the real filesystem
+    paths) rather than the gallery component's value, which Gradio may have
+    replaced with temp-directory copies.
+    """
+    image_path = Path(original_paths[evt.index])
+    log_path = image_path.parent / "log.html"
+    try:
+        meta = parse_log(log_path, image_path.name)
+        return str(image_path), meta.positive_prompt, meta.negative_prompt, meta.seed, ""
+    except LogParseError as e:
+        return str(image_path), "", "", 0, f"\u26a0 {e}"
+
+
+def on_submit(selected_path_str, positive, negative, seed, uov_method):
+    """Submit the selected image to Fooocus and add it to the queue."""
+    if not selected_path_str:
+        return "No image selected.", queue.as_table_rows()
+
+    image_path = Path(selected_path_str)
+    filename = image_path.name
+
+    try:
+        submitted = submit_upscale_job(
+            fooocus,
+            image_path,
+            UovMethod(uov_method),
+            positive,
+            negative,
+            int(seed),
+        )
+        entry = QueueEntry(
+            job_id=submitted.job_id,
+            image_filename=filename,
+            uov_method=uov_method,
+            positive_prompt=positive,
+            seed=int(seed),
+            status="queued",
+            submitted_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        )
+        queue.add(entry)
+        _start_polling(submitted)
+        return f"\u2713 Submitted: {filename} ({uov_method})", queue.as_table_rows()
+    except Exception as e:
+        return f"\u2717 Submission failed: {e}", queue.as_table_rows()
+
+
+# ---------------------------------------------------------------------------
+# Gradio UI
+# ---------------------------------------------------------------------------
+
+# Compute startup state once at module level (pure filesystem reads)
+_all_date_dirs = get_date_dirs(config.outputs_root)
+_initial_loaded = min(DAYS_PER_PAGE, len(_all_date_dirs))
+_initial_paths = images_for_dirs(_all_date_dirs[:_initial_loaded])
+
+with gr.Blocks(title="Fooocus Upscale Queue") as demo:
+    gr.Markdown("## Fooocus Upscale Queue")
+
+    # --- hidden state ---
+    # All available date-dirs (list[Path]); never changes after startup.
+    all_dirs_state = gr.State(_all_date_dirs)
+    # How many date-dirs are currently shown in the gallery.
+    loaded_days_state = gr.State(_initial_loaded)
+    # Original filesystem paths for the currently-visible gallery images.
+    gallery_paths = gr.State(_initial_paths)
+    # Full original path of the currently-selected image.
+    selected_path = gr.State("")
+
+    # --- gallery + load-more ---
+    gallery = gr.Gallery(
+        value=_initial_paths,
+        label="Output Images",
+        columns=4,
+        height=400,
+        allow_preview=True,
+    )
+    load_more_btn = gr.Button(
+        value=_load_more_label(_initial_loaded, len(_all_date_dirs)),
+        interactive=(_initial_loaded < len(_all_date_dirs)),
+        size="sm",
+    )
+
+    # --- metadata + submit panel ---
+    with gr.Row():
+        with gr.Column():
+            pos_prompt = gr.Textbox(label="Positive Prompt", interactive=False, lines=3)
+            neg_prompt = gr.Textbox(label="Negative Prompt", interactive=False, lines=2)
+            seed_box = gr.Number(label="Seed", interactive=False)
+        with gr.Column():
+            uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UOV_OPTIONS[0])
+            submit_btn = gr.Button("Submit for Upscaling", variant="primary")
+            status_msg = gr.Markdown("")
+
+    gr.Markdown("### Queue")
+    queue_table = gr.DataFrame(
+        value=queue.as_table_rows(),
+        headers=["Image", "Operation", "Status", "Submitted"],
+        interactive=False,
+    )
+
+    # Refresh queue table every 3 s to reflect background polling updates
+    gr.Timer(3).tick(fn=lambda: queue.as_table_rows(), outputs=queue_table)
+
+    # "Load more days" — appends next DAYS_PER_PAGE dirs to gallery + state
+    load_more_btn.click(
+        fn=on_load_more,
+        inputs=[all_dirs_state, loaded_days_state],
+        outputs=[gallery, gallery_paths, loaded_days_state, load_more_btn],
+    )
+
+    gallery.select(
+        fn=on_image_select,
+        inputs=[gallery_paths],          # real paths, not gallery's temp copies
+        outputs=[selected_path, pos_prompt, neg_prompt, seed_box, status_msg],
+    )
+
+    submit_btn.click(
+        fn=on_submit,
+        inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio],
+        outputs=[status_msg, queue_table],
+    )
+
+
+if __name__ == "__main__":
+    demo.launch()
