@@ -18,6 +18,7 @@ from config import load_config
 from fooocus_client import (
     SubmittedJob,
     UovMethod,
+    PerformancePreset,
     create_client,
     get_job_status,
     submit_upscale_job,
@@ -36,7 +37,8 @@ config = load_config()
 fooocus = create_client(config.fooocus_url)
 queue = QueueManager(config.queue_file)
 
-UOV_OPTIONS = [m.value for m in UovMethod]
+UOV_OPTIONS         = [m.value for m in UovMethod]
+PERFORMANCE_OPTIONS = [p.value for p in PerformancePreset]
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -107,12 +109,12 @@ def on_image_select(evt: gr.SelectData, original_paths: list):
     log_path = image_path.parent / "log.html"
     try:
         meta = parse_log(log_path, image_path.name)
-        return str(image_path), meta.positive_prompt, meta.negative_prompt, meta.seed, ""
+        return str(image_path), meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, ""
     except LogParseError as e:
-        return str(image_path), "", "", 0, f"\u26a0 {e}"
+        return str(image_path), "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
 
 
-def on_submit(selected_path_str, positive, negative, seed, uov_method):
+def on_submit(selected_path_str, positive, negative, seed, uov_method, performance):
     """Submit the selected image to Fooocus and add it to the queue."""
     if not selected_path_str:
         return "No image selected.", queue.as_table_rows()
@@ -125,6 +127,7 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method):
             fooocus,
             image_path,
             UovMethod(uov_method),
+            PerformancePreset(performance),
             positive,
             negative,
             int(seed),
@@ -133,6 +136,7 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method):
             job_id=submitted.job_id,
             image_filename=filename,
             uov_method=uov_method,
+            performance=performance,
             positive_prompt=positive,
             seed=int(seed),
             status="queued",
@@ -140,7 +144,7 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method):
         )
         queue.add(entry)
         _start_polling(submitted)
-        return f"\u2713 Submitted: {filename} ({uov_method})", queue.as_table_rows()
+        return f"\u2713 Submitted: {filename} ({uov_method}, {performance})", queue.as_table_rows()
     except Exception as e:
         return f"\u2717 Submission failed: {e}", queue.as_table_rows()
 
@@ -189,13 +193,18 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
             seed_box = gr.Number(label="Seed", interactive=False)
         with gr.Column():
             uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UOV_OPTIONS[0])
+            perf_radio = gr.Radio(
+                PERFORMANCE_OPTIONS,
+                label="Performance",
+                value=PerformancePreset.SPEED.value,
+            )
             submit_btn = gr.Button("Submit for Upscaling", variant="primary")
             status_msg = gr.Markdown("")
 
     gr.Markdown("### Queue")
     queue_table = gr.DataFrame(
         value=queue.as_table_rows(),
-        headers=["Image", "Operation", "Status", "Submitted"],
+        headers=["Image", "Operation", "Performance", "Status", "Submitted"],
         interactive=False,
     )
 
@@ -212,12 +221,12 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
     gallery.select(
         fn=on_image_select,
         inputs=[gallery_paths],          # real paths, not gallery's temp copies
-        outputs=[selected_path, pos_prompt, neg_prompt, seed_box, status_msg],
+        outputs=[selected_path, pos_prompt, neg_prompt, seed_box, perf_radio, status_msg],
     )
 
     submit_btn.click(
         fn=on_submit,
-        inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio],
+        inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio, perf_radio],
         outputs=[status_msg, queue_table],
     )
 

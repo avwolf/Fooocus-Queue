@@ -14,6 +14,7 @@ class QueueEntry:
     seed: int
     status: str           # "queued" | "processing" | "done" | "failed" | "submitted (previous session)"
     submitted_at: str     # formatted timestamp string
+    performance: str = "Speed"  # Fooocus Performance radio; default keeps old entries valid
 
 
 class QueueManager:
@@ -56,6 +57,6 @@ class QueueManager:
     def as_table_rows(self) -> list[list[str]]:
         """Returns rows for a Gradio DataFrame display, newest-first."""
         return [
-            [e.image_filename, e.uov_method, e.status, e.submitted_at]
+            [e.image_filename, e.uov_method, e.performance, e.status, e.submitted_at]
             for e in reversed(self.entries)
         ]

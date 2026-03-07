@@ -34,6 +34,7 @@ index 0  : internal Gradio state component (None)
 index 1  : Generate Image Grid checkbox
 index 2  : positive prompt
 index 3  : negative prompt
+index 5  : Performance radio (overridden to user's choice)
 index 7  : Image Number slider (overridden to 1)
 index 9  : seed (as str)
 index 19 : Input Image tab enabled (True)
@@ -71,6 +72,17 @@ class UovMethod(str, Enum):
     UPSCALE_1_5X    = "Upscale (1.5x)"
     UPSCALE_2X      = "Upscale (2x)"
     UPSCALE_FAST_2X = "Upscale (Fast 2x)"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class PerformancePreset(str, Enum):
+    SPEED         = "Speed"
+    QUALITY       = "Quality"
+    EXTREME_SPEED = "Extreme Speed"
+    LIGHTNING     = "Lightning"
+    HYPER_SD      = "Hyper-SD"
 
     def __str__(self) -> str:
         return self.value
@@ -210,6 +222,7 @@ class FoocusConnection:
         self,
         image_path:      Path,
         uov_method:      UovMethod,
+        performance:     PerformancePreset,
         positive_prompt: str,
         negative_prompt: str,
         seed:            int,
@@ -220,12 +233,13 @@ class FoocusConnection:
         args = list(self._defaults)
         args[2]  = positive_prompt
         args[3]  = negative_prompt
-        args[7]  = 1                # Image Number slider — generate exactly 1
+        args[5]  = str(performance)  # Performance radio
+        args[7]  = 1                 # Image Number slider — generate exactly 1
         args[9]  = str(seed)
-        args[19] = True             # Input Image tab enabled
-        args[20] = "uov"            # sub-tab selector
-        args[21] = str(uov_method)  # Upscale or Variation radio
-        args[22] = file_data        # base64 data URI
+        args[19] = True              # Input Image tab enabled
+        args[20] = "uov"             # sub-tab selector
+        args[21] = str(uov_method)   # Upscale or Variation radio
+        args[22] = file_data         # base64 data URI
 
         return SubmittedJob(
             job_id=str(uuid.uuid4()),
@@ -289,7 +303,7 @@ def _gallery_has_images(item) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Public API — same interface as before; app.py is unchanged
+# Public API
 # ---------------------------------------------------------------------------
 
 def create_client(fooocus_url: str) -> FoocusConnection:
@@ -301,12 +315,13 @@ def submit_upscale_job(
     conn:            FoocusConnection,
     image_path:      Path,
     uov_method:      UovMethod,
+    performance:     PerformancePreset,
     positive_prompt: str,
     negative_prompt: str,
     seed:            int,
 ) -> SubmittedJob:
     """Encode image and start generation. Returns immediately; runs in background."""
-    return conn.submit(image_path, uov_method, positive_prompt, negative_prompt, seed)
+    return conn.submit(image_path, uov_method, performance, positive_prompt, negative_prompt, seed)
 
 
 def get_job_status(submitted_job: SubmittedJob) -> str:

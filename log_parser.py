@@ -8,6 +8,7 @@ class ImageMetadata:
     positive_prompt: str
     negative_prompt: str
     seed: int
+    performance: str = "Speed"  # absent in older logs; default matches Fooocus's default
 
 
 class LogParseError(Exception):
@@ -66,4 +67,5 @@ def _extract_metadata(container, image_filename: str) -> ImageMetadata:
         positive_prompt=metadata["Prompt"],
         negative_prompt=metadata["Negative Prompt"],
         seed=seed,
+        performance=metadata.get("Performance", "Speed"),
     )
