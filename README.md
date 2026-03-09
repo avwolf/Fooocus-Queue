@@ -81,7 +81,11 @@ Then open **http://localhost:7860** in your browser.
 
 The gallery shows images from your Fooocus output folder, newest first.  Click an image
 to select it; its prompt, seed, and performance setting are read automatically from
-Fooocus's `log.html`.
+Fooocus's `log.html`.  The selected image is highlighted in the gallery — no lightbox
+popup.
+
+If you have generated new images in Fooocus since the app was started, click
+**↻ Refresh Gallery** to rescan the output folder and bring them in.
 
 **4. Choose an operation**
 
