@@ -258,4 +258,4 @@ with gr.Blocks(title="Fooocus Upscale Queue", css=_CSS) as demo:
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(allowed_paths=[str(config.outputs_root)])
