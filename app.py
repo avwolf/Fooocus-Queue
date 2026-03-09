@@ -98,6 +98,18 @@ def on_load_more(all_dirs: list, loaded_count: int):
     return paths, paths, new_count, btn
 
 
+def on_refresh_gallery():
+    """Re-scan the outputs folder and reset the gallery to the first page."""
+    new_all_dirs = get_date_dirs(config.outputs_root)
+    new_loaded   = min(DAYS_PER_PAGE, len(new_all_dirs))
+    new_paths    = images_for_dirs(new_all_dirs[:new_loaded])
+    btn          = gr.update(
+        value=_load_more_label(new_loaded, len(new_all_dirs)),
+        interactive=(new_loaded < len(new_all_dirs)),
+    )
+    return new_paths, new_paths, new_all_dirs, new_loaded, btn
+
+
 def on_image_select(evt: gr.SelectData, original_paths: list):
     """Populate metadata fields when an image is clicked in the gallery.
 
@@ -177,13 +189,14 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
         label="Output Images",
         columns=4,
         height=400,
-        allow_preview=True,
+        allow_preview=False,
     )
     load_more_btn = gr.Button(
         value=_load_more_label(_initial_loaded, len(_all_date_dirs)),
         interactive=(_initial_loaded < len(_all_date_dirs)),
         size="sm",
     )
+    refresh_btn = gr.Button("↻ Refresh Gallery", size="sm")
 
     # --- metadata + submit panel ---
     with gr.Row():
@@ -216,6 +229,13 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
         fn=on_load_more,
         inputs=[all_dirs_state, loaded_days_state],
         outputs=[gallery, gallery_paths, loaded_days_state, load_more_btn],
+    )
+
+    # "Refresh Gallery" — re-scans outputs folder and resets to first page
+    refresh_btn.click(
+        fn=on_refresh_gallery,
+        inputs=[],
+        outputs=[gallery, gallery_paths, all_dirs_state, loaded_days_state, load_more_btn],
     )
 
     gallery.select(
