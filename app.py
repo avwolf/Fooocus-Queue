@@ -170,7 +170,13 @@ _all_date_dirs = get_date_dirs(config.outputs_root)
 _initial_loaded = min(DAYS_PER_PAGE, len(_all_date_dirs))
 _initial_paths = images_for_dirs(_all_date_dirs[:_initial_loaded])
 
-with gr.Blocks(title="Fooocus Upscale Queue") as demo:
+_CSS = """
+.thumbnail-item.selected {
+    box-shadow: inset 0 0 0 2px var(--color-accent), var(--shadow-drop) !important;
+}
+"""
+
+with gr.Blocks(title="Fooocus Upscale Queue", css=_CSS) as demo:
     gr.Markdown("## Fooocus Upscale Queue")
 
     # --- hidden state ---
