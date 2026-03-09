@@ -176,7 +176,7 @@ _CSS = """
 }
 """
 
-with gr.Blocks(title="Fooocus Upscale Queue", css=_CSS) as demo:
+with gr.Blocks(title="Fooocus Upscale Queue") as demo:
     gr.Markdown("## Fooocus Upscale Queue")
 
     # --- hidden state ---
@@ -258,4 +258,4 @@ with gr.Blocks(title="Fooocus Upscale Queue", css=_CSS) as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(allowed_paths=[str(config.outputs_root)])
+    demo.launch(allowed_paths=[str(config.outputs_root)], css=_CSS)
