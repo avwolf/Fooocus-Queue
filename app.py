@@ -37,6 +37,29 @@ config = load_config()
 fooocus = create_client(config.fooocus_url)
 queue = QueueManager(config.queue_file)
 
+
+def _requeue_startup_jobs() -> None:
+    """Re-submit any jobs that were still queued when the app last shut down."""
+    for entry in queue.requeue_candidates():
+        image_path = Path(entry.image_path)
+        if not image_path.exists():
+            queue.update_status(entry.job_id, "failed")
+            continue
+        try:
+            submitted = submit_upscale_job(
+                fooocus,
+                image_path,
+                UovMethod(entry.uov_method),
+                PerformancePreset(entry.performance),
+                entry.positive_prompt,
+                entry.negative_prompt,
+                entry.seed,
+            )
+            queue.update_job_id(entry.job_id, submitted.job_id)
+            _start_polling(submitted)
+        except Exception:
+            queue.update_status(entry.job_id, "failed")
+
 UOV_OPTIONS         = [m.value for m in UovMethod]
 PERFORMANCE_OPTIONS = [p.value for p in PerformancePreset]
 
@@ -150,9 +173,11 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
             uov_method=uov_method,
             performance=performance,
             positive_prompt=positive,
+            negative_prompt=negative,
             seed=int(seed),
             status="queued",
             submitted_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            image_path=str(image_path),
         )
         queue.add(entry)
         _start_polling(submitted)
@@ -164,6 +189,9 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
 # ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
+
+# Re-submit jobs that were still queued when the app last shut down
+_requeue_startup_jobs()
 
 # Compute startup state once at module level (pure filesystem reads)
 _all_date_dirs = get_date_dirs(config.outputs_root)
@@ -207,8 +235,8 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
     # --- metadata + submit panel ---
     with gr.Row():
         with gr.Column():
-            pos_prompt = gr.Textbox(label="Positive Prompt", interactive=False, lines=3)
-            neg_prompt = gr.Textbox(label="Negative Prompt", interactive=False, lines=2)
+            pos_prompt = gr.Textbox(label="Positive Prompt", interactive=True, lines=3)
+            neg_prompt = gr.Textbox(label="Negative Prompt", interactive=True, lines=2)
             seed_box = gr.Number(label="Seed", interactive=False)
         with gr.Column():
             uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UOV_OPTIONS[0])
@@ -258,4 +286,18 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(allowed_paths=[str(config.outputs_root)], css=_CSS)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Fooocus Upscale Queue")
+    parser.add_argument(
+        "--listen",
+        nargs="?",
+        const="0.0.0.0",
+        default=None,
+        metavar="IP",
+        help="IP address to listen on (default: 0.0.0.0 if flag present, 127.0.0.1 if omitted)",
+    )
+    args = parser.parse_args()
+
+    server_name = args.listen if args.listen is not None else "127.0.0.1"
+    demo.launch(allowed_paths=[str(config.outputs_root)], css=_CSS, server_name=server_name)

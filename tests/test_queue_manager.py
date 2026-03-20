@@ -60,11 +60,11 @@ def test_update_status_unknown_job_is_noop(tmp_path):
     assert qm.entries[0].status == "queued"
 
 
-def test_non_terminal_status_replaced_on_reload(tmp_path):
+def test_non_terminal_without_image_path_becomes_previous_session(tmp_path):
     qf = tmp_path / "queue.json"
     qm = QueueManager(qf)
-    qm.add(make_entry("aaa", status="queued"))
-    qm.add(make_entry("bbb", status="processing"))
+    qm.add(make_entry("aaa", status="queued"))      # no image_path
+    qm.add(make_entry("bbb", status="processing"))  # no image_path
     qm.add(make_entry("ccc", status="done"))
 
     qm2 = QueueManager(qf)
@@ -72,6 +72,48 @@ def test_non_terminal_status_replaced_on_reload(tmp_path):
     assert statuses["aaa"] == "submitted (previous session)"
     assert statuses["bbb"] == "submitted (previous session)"
     assert statuses["ccc"] == "done"  # terminal — unchanged
+
+
+def test_non_terminal_with_image_path_stays_queued_on_reload(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    entry = make_entry("aaa", status="queued")
+    entry.image_path = "/some/path/image.png"
+    qm.add(entry)
+    entry2 = make_entry("bbb", status="processing")
+    entry2.image_path = "/some/path/image2.png"
+    qm.add(entry2)
+
+    qm2 = QueueManager(qf)
+    statuses = {e.job_id: e.status for e in qm2.entries}
+    assert statuses["aaa"] == "queued"
+    assert statuses["bbb"] == "queued"
+
+
+def test_requeue_candidates_returns_queued_with_image_path(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    entry_with_path = make_entry("aaa", status="queued")
+    entry_with_path.image_path = "/some/path/image.png"
+    qm.add(entry_with_path)
+    qm.add(make_entry("bbb", status="queued"))  # no image_path
+    qm.add(make_entry("ccc", status="done"))
+
+    candidates = qm.requeue_candidates()
+    assert len(candidates) == 1
+    assert candidates[0].job_id == "aaa"
+
+
+def test_update_job_id_persists(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    qm.add(make_entry("old-id"))
+    qm.update_job_id("old-id", "new-id")
+
+    qm2 = QueueManager(qf)
+    ids = [e.job_id for e in qm2.entries]
+    assert "new-id" in ids
+    assert "old-id" not in ids
 
 
 def test_corrupt_queue_json_returns_empty(tmp_path):
