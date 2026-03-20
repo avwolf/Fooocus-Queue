@@ -15,6 +15,8 @@ class QueueEntry:
     status: str           # "queued" | "processing" | "done" | "failed" | "submitted (previous session)"
     submitted_at: str     # formatted timestamp string
     performance: str = "Speed"  # Fooocus Performance radio; default keeps old entries valid
+    negative_prompt: str = ""   # stored so jobs can be re-queued on next launch
+    image_path: str = ""        # absolute path to source image; empty for legacy entries
 
 
 class QueueManager:
@@ -29,9 +31,13 @@ class QueueManager:
             data = json.loads(self.queue_file.read_text(encoding="utf-8"))
             entries = []
             for e in data:
-                # Jobs in non-terminal states from a previous session can't be re-polled
                 if e.get("status") in ("queued", "processing"):
-                    e["status"] = "submitted (previous session)"
+                    if e.get("image_path"):
+                        # Keep as "queued" so startup can re-submit them
+                        e["status"] = "queued"
+                    else:
+                        # Legacy entry — no stored path, can't re-submit
+                        e["status"] = "submitted (previous session)"
                 entries.append(QueueEntry(**e))
             return entries
         except Exception:
@@ -47,6 +53,18 @@ class QueueManager:
                 entry.status = status
                 break
         self._save()
+
+    def update_job_id(self, old_id: str, new_id: str) -> None:
+        """Replace job_id when an entry is re-submitted on startup."""
+        for entry in self.entries:
+            if entry.job_id == old_id:
+                entry.job_id = new_id
+                break
+        self._save()
+
+    def requeue_candidates(self) -> list[QueueEntry]:
+        """Return entries that should be re-submitted on startup."""
+        return [e for e in self.entries if e.status == "queued" and e.image_path]
 
     def _save(self) -> None:
         self.queue_file.write_text(
