@@ -120,6 +120,13 @@ complete.  Results appear in the gallery on the next page load or after clicking
 
 Jobs run one at a time; additional submissions wait in the queue automatically.
 
+**Note on processing order:** Jobs are not guaranteed to run in the order they were
+submitted.  Fooocus can only process one job at a time, so waiting jobs are held back
+by a lock (called a semaphore).  When a job finishes and the lock is released, the
+operating system decides which waiting job gets it next — and it doesn't always pick
+the one that has been waiting longest.  In practice the order is usually close to
+submission order, but don't rely on it.
+
 ---
 
 ## Running the tests

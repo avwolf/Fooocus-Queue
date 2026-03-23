@@ -6,6 +6,7 @@ Then open:  http://localhost:7860
 """
 from __future__ import annotations
 
+import html as html_module
 import re
 import threading
 import time
@@ -36,6 +37,9 @@ DAYS_PER_PAGE = 3  # how many date-dirs to load initially and per "load more" cl
 config = load_config()
 fooocus = create_client(config.fooocus_url)
 queue = QueueManager(config.queue_file)
+
+# Maps job_id → live SubmittedJob so on_cancel can reach them.
+_active_jobs: dict[str, SubmittedJob] = {}
 
 
 def _requeue_startup_jobs() -> None:
@@ -94,15 +98,89 @@ def _load_more_label(loaded: int, total: int) -> str:
 
 def _start_polling(submitted: SubmittedJob) -> None:
     """Background thread: poll job status every 2 s until terminal."""
+    _active_jobs[submitted.job_id] = submitted
+
     def poll() -> None:
         while True:
             time.sleep(2)
             status = get_job_status(submitted)
             queue.update_status(submitted.job_id, status)
-            if status in ("done", "failed"):
+            if status in ("done", "failed", "cancelled"):
+                _active_jobs.pop(submitted.job_id, None)
                 break
 
     threading.Thread(target=poll, daemon=True).start()
+
+
+def _action_js(action: str, job_id: str) -> str:
+    """Return onclick JS that calls the Gradio queue_action API directly via fetch.
+
+    This bypasses Gradio's component event system (which does not respond to
+    synthetic DOM events) and posts straight to the HTTP API instead.
+    The queue timer picks up any state changes within 3 s.
+    """
+    value = f"{action}:{job_id}"   # e.g. "cancel:abc-123" or "retry:abc-123"
+    return (
+        f"(function(){{"
+        f"fetch('/gradio_api/call/queue_action',"
+        f"{{method:'POST',"
+        f"headers:{{'Content-Type':'application/json'}},"
+        f"body:JSON.stringify({{data:['{value}']}})}}"
+        f").then(function(r){{return r.json();}}).then(function(d){{"
+        f"if(d&&d.event_id){{"
+        f"var es=new EventSource('/gradio_api/call/queue_action/'+d.event_id);"
+        f"es.onmessage=function(e){{if(e.data!='HEARTBEAT'){{es.close();}}}};"
+        f"es.onerror=function(){{es.close();}};"
+        f"}}}}).catch(function(e){{console.error('[action] fetch failed',e);}});"
+        f"}})()"
+    )
+
+
+def _queue_html() -> str:
+    """Render the queue as an HTML table with per-row action buttons."""
+    entries = list(reversed(queue.entries))
+    if not entries:
+        return "<p style='color:var(--body-text-color-subdued,#888);margin:8px 0;'>Queue is empty.</p>"
+
+    rows = ""
+    for e in entries:
+        action_cell = ""
+        if e.status == "queued":
+            action_cell = (
+                f"<button onclick=\"{_action_js('cancel', e.job_id)}\" "
+                f"style='font-size:0.8em;padding:2px 8px;cursor:pointer;'>Cancel</button>"
+            )
+        elif e.status == "failed" and e.image_path:
+            action_cell = (
+                f"<button onclick=\"{_action_js('retry', e.job_id)}\" "
+                f"style='font-size:0.8em;padding:2px 8px;cursor:pointer;'>Retry</button>"
+            )
+        rows += (
+            "<tr>"
+            f"<td style='padding:4px 8px;'>{html_module.escape(e.image_filename)}</td>"
+            f"<td style='padding:4px 8px;'>{html_module.escape(e.uov_method)}</td>"
+            f"<td style='padding:4px 8px;'>{html_module.escape(e.performance)}</td>"
+            f"<td style='padding:4px 8px;'>{html_module.escape(e.status)}</td>"
+            f"<td style='padding:4px 8px;white-space:nowrap;'>{html_module.escape(e.submitted_at)}</td>"
+            f"<td style='padding:4px 8px;'>{action_cell}</td>"
+            "</tr>"
+        )
+
+    header = (
+        "<tr style='border-bottom:1px solid var(--border-color-primary,#ddd);'>"
+        "<th style='text-align:left;padding:4px 8px;'>Image</th>"
+        "<th style='text-align:left;padding:4px 8px;'>Operation</th>"
+        "<th style='text-align:left;padding:4px 8px;'>Performance</th>"
+        "<th style='text-align:left;padding:4px 8px;'>Status</th>"
+        "<th style='text-align:left;padding:4px 8px;'>Submitted</th>"
+        "<th></th>"
+        "</tr>"
+    )
+    return (
+        "<table style='width:100%;border-collapse:collapse;font-size:0.9em;'>"
+        f"<thead>{header}</thead><tbody>{rows}</tbody>"
+        "</table>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -149,10 +227,77 @@ def on_image_select(evt: gr.SelectData, original_paths: list):
         return str(image_path), "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
 
 
+def on_action(value: str):
+    """Unified handler for Cancel and Retry buttons, called via the Gradio HTTP API.
+
+    Returns an empty string (the single output is the invisible relay textbox).
+    The queue table is refreshed by the 3-second timer, not by this handler.
+    """
+    value = (value or "").strip()
+    if not value:
+        return ""
+
+    if value.startswith("retry:"):
+        _do_retry(value[len("retry:"):])
+    elif value.startswith("cancel:"):
+        _do_cancel(value[len("cancel:"):])
+    return ""
+
+
+def _do_cancel(job_id: str):
+    """Cancel a queued job."""
+    job_id = job_id.strip()
+    if job_id:
+        job = _active_jobs.get(job_id)
+        if job:
+            job.cancel()
+        queue.update_status(job_id, "cancelled")
+
+
+def _do_retry(job_id: str):
+    """Re-submit a failed job."""
+    job_id = job_id.strip()
+    print(f"[retry] called: job_id={job_id!r}")
+    if not job_id:
+        return
+
+    entry = queue.get_entry(job_id)
+    if entry is None:
+        print(f"[retry] bailing: entry not found for {job_id!r}")
+        return
+    if not entry.image_path:
+        print(f"[retry] bailing: no image_path on entry {job_id!r}")
+        return
+
+    image_path = Path(entry.image_path)
+    print(f"[retry] image_path={image_path!r}  exists={image_path.exists()}")
+    if not image_path.exists():
+        print(f"[retry] bailing: image not found at {image_path!r}")
+        return
+
+    try:
+        submitted = submit_upscale_job(
+            fooocus,
+            image_path,
+            UovMethod(entry.uov_method),
+            PerformancePreset(entry.performance),
+            entry.positive_prompt,
+            entry.negative_prompt,
+            entry.seed,
+        )
+        print(f"[retry] submitted OK: new job_id={submitted.job_id!r}")
+        queue.update_job_id(entry.job_id, submitted.job_id)
+        queue.update_status(submitted.job_id, "queued")
+        _start_polling(submitted)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
 def on_submit(selected_path_str, positive, negative, seed, uov_method, performance):
     """Submit the selected image to Fooocus and add it to the queue."""
     if not selected_path_str:
-        return "No image selected.", queue.as_table_rows()
+        return "No image selected.", _queue_html()
 
     image_path = Path(selected_path_str)
     filename = image_path.name
@@ -181,9 +326,9 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
         )
         queue.add(entry)
         _start_polling(submitted)
-        return f"\u2713 Submitted: {filename} ({uov_method}, {performance})", queue.as_table_rows()
+        return f"\u2713 Submitted: {filename} ({uov_method}, {performance})", _queue_html()
     except Exception as e:
-        return f"\u2717 Submission failed: {e}", queue.as_table_rows()
+        return f"\u2717 Submission failed: {e}", _queue_html()
 
 
 # ---------------------------------------------------------------------------
@@ -249,14 +394,14 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
             status_msg = gr.Markdown("")
 
     gr.Markdown("### Queue")
-    queue_table = gr.DataFrame(
-        value=queue.as_table_rows(),
-        headers=["Image", "Operation", "Performance", "Status", "Submitted"],
-        interactive=False,
-    )
+    queue_table = gr.HTML(value=_queue_html())
+    # Invisible textbox used only to attach the queue_action API endpoint.
+    # Cancel/Retry buttons call it directly via fetch; Gradio's DOM event
+    # system is not used.
+    _action_relay = gr.Textbox(visible=False)
 
-    # Refresh queue table every 3 s to reflect background polling updates
-    gr.Timer(3).tick(fn=lambda: queue.as_table_rows(), outputs=queue_table)
+    # Refresh queue every 3 s to reflect background polling updates
+    gr.Timer(3).tick(fn=_queue_html, outputs=queue_table)
 
     # "Load more days" — appends next DAYS_PER_PAGE dirs to gallery + state
     load_more_btn.click(
@@ -282,6 +427,15 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
         fn=on_submit,
         inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio, perf_radio],
         outputs=[status_msg, queue_table],
+    )
+
+    # Expose on_action via the Gradio HTTP API so the HTML buttons can call it
+    # with a bare fetch() rather than relying on synthetic DOM events.
+    _action_relay.input(
+        fn=on_action,
+        inputs=[_action_relay],
+        outputs=[_action_relay],
+        api_name="queue_action",
     )
 
 

@@ -116,6 +116,37 @@ def test_update_job_id_persists(tmp_path):
     assert "old-id" not in ids
 
 
+def test_get_entry_returns_correct_entry(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    qm.add(make_entry("aaa"))
+    qm.add(make_entry("bbb"))
+    assert qm.get_entry("aaa").job_id == "aaa"
+    assert qm.get_entry("bbb").job_id == "bbb"
+    assert qm.get_entry("zzz") is None
+
+
+def test_cancelled_status_persists(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    qm.add(make_entry("aaa"))
+    qm.update_status("aaa", "cancelled")
+
+    qm2 = QueueManager(qf)
+    assert qm2.entries[0].status == "cancelled"
+
+
+def test_cancelled_status_unchanged_on_reload(tmp_path):
+    """Cancelled is a terminal state — it must not be re-mapped on reload."""
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    qm.add(make_entry("aaa", status="queued"))
+    qm.update_status("aaa", "cancelled")
+
+    qm2 = QueueManager(qf)
+    assert qm2.entries[0].status == "cancelled"
+
+
 def test_corrupt_queue_json_returns_empty(tmp_path):
     qf = tmp_path / "queue.json"
     qf.write_text("not valid json {{{", encoding="utf-8")

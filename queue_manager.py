@@ -66,6 +66,13 @@ class QueueManager:
         """Return entries that should be re-submitted on startup."""
         return [e for e in self.entries if e.status == "queued" and e.image_path]
 
+    def get_entry(self, job_id: str) -> "QueueEntry | None":
+        """Return the entry with the given job_id, or None if not found."""
+        for entry in self.entries:
+            if entry.job_id == job_id:
+                return entry
+        return None
+
     def _save(self) -> None:
         self.queue_file.write_text(
             json.dumps([asdict(e) for e in self.entries], indent=2),

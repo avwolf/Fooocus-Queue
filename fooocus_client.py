@@ -97,11 +97,12 @@ class SubmittedJob:
     """
 
     def __init__(self, job_id: str, url: str, args: list, args66: list) -> None:
-        self.job_id   = job_id
-        self._status  = "queued"      # becomes "processing" once semaphore is acquired
-        self._url     = url
-        self._args    = args
-        self._args66  = args66
+        self.job_id        = job_id
+        self._status       = "queued"      # becomes "processing" once semaphore is acquired
+        self._url          = url
+        self._args         = args
+        self._args66       = args66
+        self._cancel_event = threading.Event()
         self._start_thread()
 
     # ------------------------------------------------------------------
@@ -174,7 +175,19 @@ class SubmittedJob:
 
     def _start_thread(self) -> None:
         def run() -> None:
-            _fooocus_semaphore.acquire()   # block until previous job finishes
+            # Poll for the semaphore in short bursts so cancel can interrupt the wait.
+            acquired = False
+            while not self._cancel_event.is_set():
+                if _fooocus_semaphore.acquire(timeout=0.5):
+                    acquired = True
+                    break
+
+            # If cancelled while waiting, or cancel raced with acquire, bail out.
+            if not acquired or self._cancel_event.is_set():
+                if acquired:
+                    _fooocus_semaphore.release()
+                return
+
             self._status = "processing"    # now actively using Fooocus
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -191,6 +204,11 @@ class SubmittedJob:
                 loop.close()
 
         threading.Thread(target=run, daemon=True).start()
+
+    def cancel(self) -> None:
+        """Request cancellation. Only effective while status is 'queued'."""
+        self._status = "cancelled"
+        self._cancel_event.set()
 
     def get_status(self) -> str:
         return self._status
