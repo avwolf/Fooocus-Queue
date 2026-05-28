@@ -28,19 +28,26 @@ Fooocus's gradio_hijack.py overrides Image.preprocess: it asserts isinstance(x, 
 then immediately calls decode_base64_to_image(x), which splits on "," and decodes
 the second part.  We therefore send a full "data:<mime>;base64,<data>" URI.
 
-Data array for fn_index=67 (141 items)
----------------------------------------
-index 0  : internal Gradio state component (None)
-index 1  : Generate Image Grid checkbox
-index 2  : positive prompt
-index 3  : negative prompt
-index 5  : Performance radio (overridden to user's choice)
-index 7  : Image Number slider (overridden to 1)
-index 9  : seed (as str)
-index 19 : Input Image tab enabled (True)
-index 20 : sub-tab selector ("uov")
-index 21 : UOV method string
-index 22 : image as "data:<mime>;base64,<data>" URI string
+Data array for fn_index=67
+---------------------------
+The fixed pre-LoRA prefix is:
+  index 0  : internal Gradio state component (None)
+  index 1  : Generate Image Grid checkbox
+  index 2  : positive prompt
+  index 3  : negative prompt
+  index 5  : Performance radio (overridden to user's choice)
+  index 7  : Image Number slider (overridden to 1)
+  index 9  : seed (as str)
+
+After the fixed prefix come `default_max_lora_number * 3` LoRA slots
+(enabled, filename, weight), so the absolute positions of the UOV block
+depend on the user's Fooocus config. We locate the UOV method radio by
+searching for the component whose choices include "Upscale (2x)", then
+the four UOV-block indices are:
+  uov_index - 2 : Input Image tab enabled (True)
+  uov_index - 1 : sub-tab selector ("uov")
+  uov_index     : UOV method string
+  uov_index + 1 : image as "data:<mime>;base64,<data>" URI string
 """
 from __future__ import annotations
 
@@ -219,7 +226,7 @@ class FoocusConnection:
 
     def __init__(self, fooocus_url: str) -> None:
         self._url      = fooocus_url.rstrip("/")
-        self._defaults = _fetch_fn67_defaults(self._url)
+        self._defaults, self._uov_index = _fetch_fn67_defaults(self._url)
         self._args66   = _fetch_fn66_defaults(self._url)
 
     def _encode_image(self, image_path: Path) -> str:
@@ -247,17 +254,19 @@ class FoocusConnection:
     ) -> SubmittedJob:
         file_data = self._encode_image(image_path)
 
-        # 141 items: state at [0], regular params at [1..140]
+        # State at [0], regular params follow. UOV block position is dynamic
+        # because it sits after default_max_lora_number * 3 LoRA slots.
         args = list(self._defaults)
-        args[2]  = positive_prompt
-        args[3]  = negative_prompt
-        args[5]  = str(performance)  # Performance radio
-        args[7]  = 1                 # Image Number slider — generate exactly 1
-        args[9]  = str(seed)
-        args[19] = True              # Input Image tab enabled
-        args[20] = "uov"             # sub-tab selector
-        args[21] = str(uov_method)   # Upscale or Variation radio
-        args[22] = file_data         # base64 data URI
+        uov = self._uov_index
+        args[2]      = positive_prompt
+        args[3]      = negative_prompt
+        args[5]      = str(performance)  # Performance radio
+        args[7]      = 1                 # Image Number slider — generate exactly 1
+        args[9]      = str(seed)
+        args[uov - 2] = True             # Input Image tab enabled
+        args[uov - 1] = "uov"            # sub-tab selector
+        args[uov]     = str(uov_method)  # Upscale or Variation radio
+        args[uov + 1] = file_data        # base64 data URI
 
         return SubmittedJob(
             job_id=str(uuid.uuid4()),
@@ -286,20 +295,40 @@ def _fetch_fn66_defaults(fooocus_url: str) -> list:
     ]
 
 
-def _fetch_fn67_defaults(fooocus_url: str) -> list:
+def _fetch_fn67_defaults(fooocus_url: str) -> tuple[list, int]:
     """
-    Query Fooocus /config and return the 141 default parameter values for
-    fn_index=67.  Index 0 is the Gradio state (default None); indices 1-140
-    are the regular UI parameters.
+    Query Fooocus /config and return:
+      (defaults, uov_index)
+
+    `defaults` is the list of default values for every fn_index=67 input
+    component (index 0 is the Gradio state).  `uov_index` is the position
+    of the UOV method radio in that list — needed because the number of
+    LoRA slots in front of it varies with `default_max_lora_number`.
     """
     raw    = urllib.request.urlopen(f"{fooocus_url}/config").read()
     config = json.loads(raw)
     comps  = {c["id"]: c for c in config.get("components", [])}
     dep67  = config["dependencies"][67]
-    return [
+    input_ids = dep67["inputs"]
+    defaults  = [
         comps.get(cid, {}).get("props", {}).get("value")
-        for cid in dep67["inputs"]
+        for cid in input_ids
     ]
+
+    uov_index = None
+    for i, cid in enumerate(input_ids):
+        choices = comps.get(cid, {}).get("props", {}).get("choices") or []
+        flat = [c[0] if isinstance(c, (list, tuple)) else c for c in choices]
+        if "Upscale (2x)" in flat and "Vary (Subtle)" in flat:
+            uov_index = i
+            break
+    if uov_index is None:
+        raise RuntimeError(
+            "Could not locate UOV method radio in Fooocus fn_index=67 inputs — "
+            "Fooocus UI may have changed."
+        )
+
+    return defaults, uov_index
 
 
 def _gallery_has_images(item) -> bool:

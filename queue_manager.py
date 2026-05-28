@@ -19,6 +19,10 @@ class QueueEntry:
     image_path: str = ""        # absolute path to source image; empty for legacy entries
 
 
+_TERMINAL_STATUSES = {"done", "failed", "cancelled", "submitted (previous session)"}
+_MAX_TERMINAL_HISTORY = 200
+
+
 class QueueManager:
     def __init__(self, queue_file: Path):
         self.queue_file = queue_file
@@ -74,6 +78,11 @@ class QueueManager:
         return None
 
     def _save(self) -> None:
+        terminal_indices = [i for i, e in enumerate(self.entries) if e.status in _TERMINAL_STATUSES]
+        excess = len(terminal_indices) - _MAX_TERMINAL_HISTORY
+        if excess > 0:
+            drop = set(terminal_indices[:excess])
+            self.entries = [e for i, e in enumerate(self.entries) if i not in drop]
         self.queue_file.write_text(
             json.dumps([asdict(e) for e in self.entries], indent=2),
             encoding="utf-8",
