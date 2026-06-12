@@ -12,6 +12,7 @@ queue.json
 
 # Claude workspace
 .claude/
+CONTEXT_EXPORT.md
 
 # Stray pip artifact
 =10.0
