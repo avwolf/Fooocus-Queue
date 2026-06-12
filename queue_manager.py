@@ -17,6 +17,7 @@ class QueueEntry:
     performance: str = "Speed"  # Fooocus Performance radio; default keeps old entries valid
     negative_prompt: str = ""   # stored so jobs can be re-queued on next launch
     image_path: str = ""        # absolute path to source image; empty for legacy entries
+    output_format: str = "png"  # Fooocus Output Format radio; png keeps old entries valid
 
 
 _TERMINAL_STATUSES = {"done", "failed", "cancelled", "submitted (previous session)"}

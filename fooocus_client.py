@@ -48,6 +48,10 @@ the four UOV-block indices are:
   uov_index - 1 : sub-tab selector ("uov")
   uov_index     : UOV method string
   uov_index + 1 : image as "data:<mime>;base64,<data>" URI string
+
+The Output Format radio (choices png/jpeg/webp) is likewise located by
+searching component choices, since its position also shifts with the
+LoRA slot count.
 """
 from __future__ import annotations
 
@@ -80,6 +84,15 @@ class UovMethod(str, Enum):
     UPSCALE_1_5X    = "Upscale (1.5x)"
     UPSCALE_2X      = "Upscale (2x)"
     UPSCALE_FAST_2X = "Upscale (Fast 2x)"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class OutputFormat(str, Enum):
+    PNG  = "png"
+    JPEG = "jpeg"
+    WEBP = "webp"
 
     def __str__(self) -> str:
         return self.value
@@ -241,7 +254,7 @@ class FoocusConnection:
 
     def __init__(self, fooocus_url: str) -> None:
         self._url      = fooocus_url.rstrip("/")
-        self._defaults, self._uov_index = _fetch_fn67_defaults(self._url)
+        self._defaults, self._uov_index, self._format_index = _fetch_fn67_defaults(self._url)
         self._args66   = _fetch_fn66_defaults(self._url)
 
     def _encode_image(self, image_path: Path) -> str:
@@ -253,7 +266,7 @@ class FoocusConnection:
         second part.  A plain file path fails that decode.
         """
         suffix = image_path.suffix.lower()
-        mime   = "image/png" if suffix == ".png" else "image/jpeg"
+        mime   = {".png": "image/png", ".webp": "image/webp"}.get(suffix, "image/jpeg")
         data   = image_path.read_bytes()
         b64    = base64.b64encode(data).decode("ascii")
         return f"data:{mime};base64,{b64}"
@@ -266,6 +279,7 @@ class FoocusConnection:
         positive_prompt: str,
         negative_prompt: str,
         seed:            int,
+        output_format:   OutputFormat = OutputFormat.PNG,
     ) -> SubmittedJob:
         file_data = self._encode_image(image_path)
 
@@ -278,6 +292,7 @@ class FoocusConnection:
         args[5]      = str(performance)  # Performance radio
         args[7]      = 1                 # Image Number slider — generate exactly 1
         args[9]      = str(seed)
+        args[self._format_index] = str(output_format)  # Output Format radio
         args[uov - 2] = True             # Input Image tab enabled
         args[uov - 1] = "uov"            # sub-tab selector
         args[uov]     = str(uov_method)  # Upscale or Variation radio
@@ -310,15 +325,16 @@ def _fetch_fn66_defaults(fooocus_url: str) -> list:
     ]
 
 
-def _fetch_fn67_defaults(fooocus_url: str) -> tuple[list, int]:
+def _fetch_fn67_defaults(fooocus_url: str) -> tuple[list, int, int]:
     """
     Query Fooocus /config and return:
-      (defaults, uov_index)
+      (defaults, uov_index, format_index)
 
     `defaults` is the list of default values for every fn_index=67 input
     component (index 0 is the Gradio state).  `uov_index` is the position
-    of the UOV method radio in that list — needed because the number of
-    LoRA slots in front of it varies with `default_max_lora_number`.
+    of the UOV method radio and `format_index` the position of the Output
+    Format radio in that list — needed because the number of LoRA slots in
+    front of them varies with `default_max_lora_number`.
     """
     raw    = urllib.request.urlopen(f"{fooocus_url}/config").read()
     config = json.loads(raw)
@@ -331,19 +347,28 @@ def _fetch_fn67_defaults(fooocus_url: str) -> tuple[list, int]:
     ]
 
     uov_index = None
+    format_index = None
     for i, cid in enumerate(input_ids):
         choices = comps.get(cid, {}).get("props", {}).get("choices") or []
         flat = [c[0] if isinstance(c, (list, tuple)) else c for c in choices]
         if "Upscale (2x)" in flat and "Vary (Subtle)" in flat:
             uov_index = i
+        elif "png" in flat and "webp" in flat:
+            format_index = i
+        if uov_index is not None and format_index is not None:
             break
     if uov_index is None:
         raise RuntimeError(
             "Could not locate UOV method radio in Fooocus fn_index=67 inputs — "
             "Fooocus UI may have changed."
         )
+    if format_index is None:
+        raise RuntimeError(
+            "Could not locate Output Format radio in Fooocus fn_index=67 inputs — "
+            "Fooocus UI may have changed."
+        )
 
-    return defaults, uov_index
+    return defaults, uov_index, format_index
 
 
 def _gallery_has_images(item) -> bool:
@@ -381,9 +406,10 @@ def submit_upscale_job(
     positive_prompt: str,
     negative_prompt: str,
     seed:            int,
+    output_format:   OutputFormat = OutputFormat.PNG,
 ) -> SubmittedJob:
     """Encode image and start generation. Returns immediately; runs in background."""
-    return conn.submit(image_path, uov_method, performance, positive_prompt, negative_prompt, seed)
+    return conn.submit(image_path, uov_method, performance, positive_prompt, negative_prompt, seed, output_format)
 
 
 def get_job_status(submitted_job: SubmittedJob) -> str:

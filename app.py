@@ -17,6 +17,7 @@ import gradio as gr
 
 from config import load_config
 from fooocus_client import (
+    OutputFormat,
     SubmittedJob,
     UovMethod,
     PerformancePreset,
@@ -58,14 +59,16 @@ def _requeue_startup_jobs() -> None:
                 entry.positive_prompt,
                 entry.negative_prompt,
                 entry.seed,
+                OutputFormat(entry.output_format),
             )
             queue.update_job_id(entry.job_id, submitted.job_id)
             _start_polling(submitted)
         except Exception:
             queue.update_status(entry.job_id, "failed")
 
-UOV_OPTIONS         = [m.value for m in UovMethod]
-PERFORMANCE_OPTIONS = [p.value for p in PerformancePreset]
+UOV_OPTIONS           = [m.value for m in UovMethod]
+PERFORMANCE_OPTIONS   = [p.value for p in PerformancePreset]
+OUTPUT_FORMAT_OPTIONS = [f.value for f in OutputFormat]
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -84,7 +87,7 @@ def images_for_dirs(date_dirs: list[Path]) -> list[str]:
     """Return image paths from the given date dirs, newest first within each dir."""
     images: list[Path] = []
     for date_dir in date_dirs:
-        for ext in ("*.png", "*.jpg", "*.webp"):
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
             images.extend(sorted(date_dir.glob(ext), reverse=True))
     return [str(p) for p in images]
 
@@ -284,6 +287,7 @@ def _do_retry(job_id: str):
             entry.positive_prompt,
             entry.negative_prompt,
             entry.seed,
+            OutputFormat(entry.output_format),
         )
         print(f"[retry] submitted OK: new job_id={submitted.job_id!r}")
         queue.update_job_id(entry.job_id, submitted.job_id)
@@ -294,7 +298,7 @@ def _do_retry(job_id: str):
         traceback.print_exc()
 
 
-def on_submit(selected_path_str, positive, negative, seed, uov_method, performance):
+def on_submit(selected_path_str, positive, negative, seed, uov_method, performance, output_format):
     """Submit the selected image to Fooocus and add it to the queue."""
     if not selected_path_str:
         return "No image selected.", _queue_html()
@@ -311,6 +315,7 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
             positive,
             negative,
             int(seed),
+            OutputFormat(output_format),
         )
         entry = QueueEntry(
             job_id=submitted.job_id,
@@ -323,6 +328,7 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
             status="queued",
             submitted_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             image_path=str(image_path),
+            output_format=output_format,
         )
         queue.add(entry)
         _start_polling(submitted)
@@ -391,6 +397,11 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
                 label="Performance",
                 value=PerformancePreset.SPEED.value,
             )
+            format_radio = gr.Radio(
+                OUTPUT_FORMAT_OPTIONS,
+                label="Output Format",
+                value=OutputFormat.WEBP.value,
+            )
             submit_btn = gr.Button("Submit for Upscaling", variant="primary")
             status_msg = gr.Markdown("")
 
@@ -426,7 +437,7 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
 
     submit_btn.click(
         fn=on_submit,
-        inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio, perf_radio],
+        inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio, perf_radio, format_radio],
         outputs=[status_msg, queue_table],
     )
 
