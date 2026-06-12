@@ -222,9 +222,9 @@ def on_image_select(evt: gr.SelectData, original_paths: list):
     log_path = image_path.parent / "log.html"
     try:
         meta = parse_log(log_path, image_path.name)
-        return str(image_path), meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, ""
+        return str(image_path), image_path.name, meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, ""
     except LogParseError as e:
-        return str(image_path), "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
+        return str(image_path), image_path.name, "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
 
 
 def on_action(value: str):
@@ -378,6 +378,7 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
     refresh_btn = gr.Button("↻ Refresh Gallery", size="sm")
 
     # --- metadata + submit panel ---
+    filename_display = gr.Textbox(label="Selected Image", interactive=False, value="")
     with gr.Row():
         with gr.Column():
             pos_prompt = gr.Textbox(label="Positive Prompt", interactive=True, lines=3)
@@ -420,7 +421,7 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
     gallery.select(
         fn=on_image_select,
         inputs=[gallery_paths],          # real paths, not gallery's temp copies
-        outputs=[selected_path, pos_prompt, neg_prompt, seed_box, perf_radio, status_msg],
+        outputs=[selected_path, filename_display, pos_prompt, neg_prompt, seed_box, perf_radio, status_msg],
     )
 
     submit_btn.click(
