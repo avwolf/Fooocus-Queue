@@ -64,7 +64,8 @@ import websockets
 
 
 _POLL_INTERVAL = 5     # seconds between fn_index=68 polls
-_POLL_MAX      = 120   # 10 minutes max (120 × 5 s)
+_POLL_MAX      = 360   # 30 minutes max (360 × 5 s) — accommodates Quality 2x + double upscales
+_RUN_TIMEOUT   = 1830  # 30.5 min outer wait_for cap on the whole generation chain
 _OPEN_TIMEOUT  = 30
 _CLOSE_TIMEOUT = 10
 
@@ -149,10 +150,12 @@ class SubmittedJob:
     async def _run_async(self) -> None:
         ws_url       = self._url.replace("http://", "ws://")
         session_hash = uuid.uuid4().hex[:12]
+        tag          = f"[job {self.job_id[:8]}]"
 
         # 1. fn_index=65: session init (Generate button click, 0 inputs)
         out65 = await self._call_fn(ws_url, session_hash, 65, [])
         if out65 is None:
+            print(f"{tag} fn=65 returned None (queue_full or ws closed) — aborting")
             return
 
         # 2. fn_index=66: seed/text update (2 inputs: Random checkbox, Seed)
@@ -162,23 +165,31 @@ class SubmittedJob:
         # 3. fn_index=67: start generation (141 inputs → state)
         out67 = await self._call_fn(ws_url, session_hash, 67, self._args)
         if out67 is None:
+            print(f"{tag} fn=67 returned None (queue_full or ws closed) — aborting")
             return
         state67 = out67[0] if out67 else None
 
         # 4. fn_index=68: poll until Finished Images gallery is non-empty
         #    outputs: [html, preview_image, finished_gallery, all_gallery]
-        for _ in range(_POLL_MAX):
+        none_streak = 0
+        for poll_n in range(_POLL_MAX):
             out68 = await self._call_fn(ws_url, session_hash, 68, [state67])
             if out68 is None:
                 # Transient WebSocket failure — sleep and retry
+                none_streak += 1
+                if none_streak in (1, 5, 20) or none_streak % 60 == 0:
+                    print(f"{tag} fn=68 poll {poll_n+1}/{_POLL_MAX}: None (streak={none_streak})")
                 await asyncio.sleep(_POLL_INTERVAL)
                 continue
+            none_streak = 0
             finished = out68[2] if len(out68) > 2 else None
             gallery  = out68[3] if len(out68) > 3 else None
             if _gallery_has_images(finished) or _gallery_has_images(gallery):
                 self._status = "done"
+                print(f"{tag} done after {poll_n+1} polls")
                 return
             await asyncio.sleep(_POLL_INTERVAL)
+        print(f"{tag} exhausted {_POLL_MAX} polls without seeing images — will be marked failed")
 
     def _start_thread(self) -> None:
         def run() -> None:
@@ -196,16 +207,20 @@ class SubmittedJob:
                 return
 
             self._status = "processing"    # now actively using Fooocus
+            tag  = f"[job {self.job_id[:8]}]"
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
                 loop.run_until_complete(
-                    asyncio.wait_for(self._run_async(), timeout=630)
+                    asyncio.wait_for(self._run_async(), timeout=_RUN_TIMEOUT)
                 )
-            except Exception:
-                pass
+            except asyncio.TimeoutError:
+                print(f"{tag} outer wait_for timed out after {_RUN_TIMEOUT}s — Fooocus may still be working")
+            except Exception as e:
+                print(f"{tag} unexpected exception: {type(e).__name__}: {e}")
             finally:
                 if self._status == "processing":
+                    print(f"{tag} marking failed (status was still 'processing' after _run_async exited)")
                     self._status = "failed"
                 _fooocus_semaphore.release()  # allow next queued job to proceed
                 loop.close()
