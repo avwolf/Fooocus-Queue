@@ -271,6 +271,15 @@ def on_image_select(evt: gr.SelectData, original_paths: list):
         return str(image_path), image_path.name, "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
 
 
+def on_clear_completed():
+    """Remove finished entries (done/failed/cancelled) from the queue table.
+
+    Active jobs ('queued' / 'processing') are kept so nothing in flight is lost.
+    """
+    queue.clear_completed()
+    return _queue_html()
+
+
 def on_action(value: str):
     """Unified handler for Cancel and Retry buttons, called via the Gradio HTTP API.
 
@@ -448,6 +457,7 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
             status_msg = gr.Markdown("")
 
     gr.Markdown("### Queue")
+    clear_completed_btn = gr.Button("🗑 Clear Completed", size="sm")
     queue_table = gr.HTML(value=_queue_html())
     # Invisible textbox used only to attach the queue_action API endpoint.
     # Cancel/Retry buttons call it directly via fetch; Gradio's DOM event
@@ -456,6 +466,9 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
 
     # Refresh queue every 3 s to reflect background polling updates
     gr.Timer(3).tick(fn=_queue_html, outputs=queue_table)
+
+    # "Clear Completed" — drop finished entries, keep active jobs
+    clear_completed_btn.click(fn=on_clear_completed, outputs=queue_table)
 
     # "Load more days" — appends next DAYS_PER_PAGE dirs to gallery + state
     load_more_btn.click(

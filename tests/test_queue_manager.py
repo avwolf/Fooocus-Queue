@@ -154,6 +154,34 @@ def test_corrupt_queue_json_returns_empty(tmp_path):
     assert qm.entries == []
 
 
+def test_clear_completed_keeps_active_and_persists(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    qm.add(make_entry("a", status="queued"))
+    qm.add(make_entry("b", status="processing"))
+    qm.add(make_entry("c", status="done"))
+    qm.add(make_entry("d", status="failed"))
+    qm.add(make_entry("e", status="cancelled"))
+
+    removed = qm.clear_completed()
+    assert removed == 3
+
+    qm2 = QueueManager(qf)
+    ids = {e.job_id for e in qm2.entries}
+    assert ids == {"a", "b"}
+
+
+def test_clear_completed_no_terminal_entries_is_noop(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    entry = make_entry("a", status="queued")
+    entry.image_path = "/some/path/image.png"
+    qm.add(entry)
+
+    assert qm.clear_completed() == 0
+    assert len(qm.entries) == 1
+
+
 def test_as_table_rows_newest_first(tmp_path):
     qf = tmp_path / "queue.json"
     qm = QueueManager(qf)
