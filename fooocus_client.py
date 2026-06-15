@@ -254,8 +254,11 @@ class FoocusConnection:
 
     def __init__(self, fooocus_url: str) -> None:
         self._url      = fooocus_url.rstrip("/")
-        self._defaults, self._uov_index, self._format_index = _fetch_fn67_defaults(self._url)
-        self._args66   = _fetch_fn66_defaults(self._url)
+        # Fetch /config once and reuse it for both the fn67 and fn66 lookups;
+        # the payload is large, so a single download halves the handshake cost.
+        config = _fetch_config(self._url)
+        self._defaults, self._uov_index, self._format_index = _fetch_fn67_defaults(config)
+        self._args66   = _fetch_fn66_defaults(config)
 
     def _encode_image(self, image_path: Path) -> str:
         """
@@ -306,17 +309,56 @@ class FoocusConnection:
         )
 
 
+class LazyFoocusConnection:
+    """Defers the Fooocus /config handshake until the connection is first used.
+
+    create_client() returns this immediately so the app can build and launch
+    its UI without blocking on Fooocus (which may be slow to respond, or still
+    booting).  The real FoocusConnection — two blocking GETs to /config — is
+    built on the first submit(), or eagerly via connect() from a background
+    warm-up thread.
+    """
+
+    def __init__(self, fooocus_url: str) -> None:
+        self._url  = fooocus_url
+        self._lock = threading.Lock()
+        self._conn: FoocusConnection | None = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._conn is not None
+
+    def connect(self) -> FoocusConnection:
+        """Build the real connection if not already built, and return it.
+
+        Thread-safe: concurrent callers (e.g. the warm-up thread and a user's
+        first submit) share a single FoocusConnection.
+        """
+        with self._lock:
+            if self._conn is None:
+                self._conn = FoocusConnection(self._url)
+            return self._conn
+
+    def submit(self, *args, **kwargs) -> SubmittedJob:
+        return self.connect().submit(*args, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_fn66_defaults(fooocus_url: str) -> list:
+def _fetch_config(fooocus_url: str) -> dict:
+    """Download and parse Fooocus's /config (the full UI component tree)."""
+    raw = urllib.request.urlopen(f"{fooocus_url}/config").read()
+    return json.loads(raw)
+
+
+def _fetch_fn66_defaults(config: dict) -> list:
     """
-    Query Fooocus /config and return the 2 default input values for fn_index=66
-    (seed/text update step).  Inputs are the Random checkbox and Seed textbox.
+    Given a parsed Fooocus /config, return the 2 default input values for
+    fn_index=66 (seed/text update step).  Inputs are the Random checkbox and
+    Seed textbox.
     """
-    raw    = urllib.request.urlopen(f"{fooocus_url}/config").read()
-    config = json.loads(raw)
     comps  = {c["id"]: c for c in config.get("components", [])}
     dep66  = config["dependencies"][66]
     return [
@@ -325,9 +367,9 @@ def _fetch_fn66_defaults(fooocus_url: str) -> list:
     ]
 
 
-def _fetch_fn67_defaults(fooocus_url: str) -> tuple[list, int, int]:
+def _fetch_fn67_defaults(config: dict) -> tuple[list, int, int]:
     """
-    Query Fooocus /config and return:
+    Given a parsed Fooocus /config, return:
       (defaults, uov_index, format_index)
 
     `defaults` is the list of default values for every fn_index=67 input
@@ -336,8 +378,6 @@ def _fetch_fn67_defaults(fooocus_url: str) -> tuple[list, int, int]:
     Format radio in that list — needed because the number of LoRA slots in
     front of them varies with `default_max_lora_number`.
     """
-    raw    = urllib.request.urlopen(f"{fooocus_url}/config").read()
-    config = json.loads(raw)
     comps  = {c["id"]: c for c in config.get("components", [])}
     dep67  = config["dependencies"][67]
     input_ids = dep67["inputs"]
@@ -393,13 +433,18 @@ def _gallery_has_images(item) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
-def create_client(fooocus_url: str) -> FoocusConnection:
-    """Connect to Fooocus and fetch current UI defaults. Raises if unreachable."""
-    return FoocusConnection(fooocus_url)
+def create_client(fooocus_url: str) -> LazyFoocusConnection:
+    """Return a lazy Fooocus connection.
+
+    The actual handshake (two blocking GETs to /config) is deferred to the
+    first submit() or an explicit connect(), so importing or launching the app
+    never blocks on Fooocus being reachable.
+    """
+    return LazyFoocusConnection(fooocus_url)
 
 
 def submit_upscale_job(
-    conn:            FoocusConnection,
+    conn:            "FoocusConnection | LazyFoocusConnection",
     image_path:      Path,
     uov_method:      UovMethod,
     performance:     PerformancePreset,

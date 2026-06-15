@@ -66,6 +66,47 @@ def _requeue_startup_jobs() -> None:
         except Exception:
             queue.update_status(entry.job_id, "failed")
 
+
+# Warm-up retry budget: Fooocus may still be loading models when this app
+# starts, so keep trying the /config handshake with capped exponential backoff.
+WARMUP_MAX_ELAPSED  = 300   # seconds to keep retrying (covers a slow Fooocus boot)
+WARMUP_BACKOFF_CAP  = 30    # max seconds between attempts
+
+
+def _startup_warmup() -> None:
+    """Connect to Fooocus and re-queue interrupted jobs, off the launch path.
+
+    Establishing the connection makes two blocking /config calls; doing it here
+    in a background thread (rather than at import) lets the UI come up
+    immediately even when Fooocus is slow or still booting.
+
+    Fooocus may still be starting up when this app launches, so we retry the
+    handshake with capped exponential backoff for up to WARMUP_MAX_ELAPSED
+    seconds. Until the connection is live we leave interrupted jobs 'queued'
+    rather than failing them, so they survive to be re-submitted once Fooocus
+    answers.
+    """
+    deadline = time.monotonic() + WARMUP_MAX_ELAPSED
+    delay    = min(2.0, WARMUP_BACKOFF_CAP)
+    attempt  = 0
+    while True:
+        attempt += 1
+        try:
+            fooocus.connect()
+            break
+        except Exception as e:
+            if time.monotonic() >= deadline:
+                print(
+                    f"[startup] Fooocus still unreachable after {WARMUP_MAX_ELAPSED}s "
+                    f"({attempt} attempts) — skipping re-queue: {e}"
+                )
+                return
+            print(f"[startup] Fooocus not reachable (attempt {attempt}); retrying in {delay:.0f}s: {e}")
+            time.sleep(delay)
+            delay = min(delay * 2, WARMUP_BACKOFF_CAP)
+    _requeue_startup_jobs()
+
+
 UOV_OPTIONS           = [m.value for m in UovMethod]
 PERFORMANCE_OPTIONS   = [p.value for p in PerformancePreset]
 OUTPUT_FORMAT_OPTIONS = [f.value for f in OutputFormat]
@@ -341,8 +382,9 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
 # Gradio UI
 # ---------------------------------------------------------------------------
 
-# Re-submit jobs that were still queued when the app last shut down
-_requeue_startup_jobs()
+# Connect to Fooocus and re-submit interrupted jobs in the background, so the
+# UI launches immediately instead of blocking on the /config handshake.
+threading.Thread(target=_startup_warmup, daemon=True).start()
 
 # Compute startup state once at module level (pure filesystem reads)
 _all_date_dirs = get_date_dirs(config.outputs_root)
