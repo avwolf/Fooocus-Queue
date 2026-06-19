@@ -129,8 +129,13 @@ def images_for_dirs(date_dirs: list[Path]) -> list[str]:
     """Return image paths from the given date dirs, newest first within each dir."""
     images: list[Path] = []
     for date_dir in date_dirs:
+        dir_images: list[Path] = []
         for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
-            images.extend(sorted(date_dir.glob(ext), reverse=True))
+            dir_images.extend(date_dir.glob(ext))
+        # Filenames are timestamp-prefixed (YYYY-MM-DD_HH-MM-SS...), so sorting
+        # by name across all extensions together yields true chronological order.
+        dir_images.sort(reverse=True)
+        images.extend(dir_images)
     return [str(p) for p in images]
 
 
