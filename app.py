@@ -454,7 +454,7 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
             neg_prompt = gr.Textbox(label="Negative Prompt", interactive=True, lines=2)
             seed_box = gr.Number(label="Seed", interactive=False)
         with gr.Column():
-            uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UOV_OPTIONS[0])
+            uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UovMethod.UPSCALE_2X.value)
             perf_radio = gr.Radio(
                 PERFORMANCE_OPTIONS,
                 label="Performance",
