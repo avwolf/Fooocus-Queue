@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import gradio as gr
+from PIL import Image
 
 from config import load_config
 from fooocus_client import (
@@ -264,11 +265,22 @@ def on_image_select(evt: gr.SelectData, original_paths: list):
     """
     image_path = Path(original_paths[evt.index])
     log_path = image_path.parent / "log.html"
+    display_name = _filename_with_dimensions(image_path)
     try:
         meta = parse_log(log_path, image_path.name)
-        return str(image_path), image_path.name, meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, ""
+        return str(image_path), display_name, meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, ""
     except LogParseError as e:
-        return str(image_path), image_path.name, "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
+        return str(image_path), display_name, "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
+
+
+def _filename_with_dimensions(image_path: Path) -> str:
+    """Return the filename suffixed with its pixel dimensions, e.g. 'foo.png (1024x1536)'."""
+    try:
+        with Image.open(image_path) as img:
+            width, height = img.size
+        return f"{image_path.name} ({width}x{height})"
+    except Exception:
+        return image_path.name
 
 
 def on_clear_completed():
