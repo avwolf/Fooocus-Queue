@@ -78,6 +78,20 @@ class QueueManager:
                 return entry
         return None
 
+    def clear_completed(self) -> int:
+        """Drop all finished entries, keeping anything still active.
+
+        Removes terminal entries (done / failed / cancelled / previous-session)
+        and leaves 'queued' and 'processing' jobs untouched. Returns the number
+        of entries removed.
+        """
+        before = len(self.entries)
+        self.entries = [e for e in self.entries if e.status not in _TERMINAL_STATUSES]
+        removed = before - len(self.entries)
+        if removed:
+            self._save()
+        return removed
+
     def _save(self) -> None:
         terminal_indices = [i for i, e in enumerate(self.entries) if e.status in _TERMINAL_STATUSES]
         excess = len(terminal_indices) - _MAX_TERMINAL_HISTORY

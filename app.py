@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import gradio as gr
+from PIL import Image
 
 from config import load_config
 from fooocus_client import (
@@ -65,6 +66,47 @@ def _requeue_startup_jobs() -> None:
             _start_polling(submitted)
         except Exception:
             queue.update_status(entry.job_id, "failed")
+
+
+# Warm-up retry budget: Fooocus may still be loading models when this app
+# starts, so keep trying the /config handshake with capped exponential backoff.
+WARMUP_MAX_ELAPSED  = 300   # seconds to keep retrying (covers a slow Fooocus boot)
+WARMUP_BACKOFF_CAP  = 30    # max seconds between attempts
+
+
+def _startup_warmup() -> None:
+    """Connect to Fooocus and re-queue interrupted jobs, off the launch path.
+
+    Establishing the connection makes two blocking /config calls; doing it here
+    in a background thread (rather than at import) lets the UI come up
+    immediately even when Fooocus is slow or still booting.
+
+    Fooocus may still be starting up when this app launches, so we retry the
+    handshake with capped exponential backoff for up to WARMUP_MAX_ELAPSED
+    seconds. Until the connection is live we leave interrupted jobs 'queued'
+    rather than failing them, so they survive to be re-submitted once Fooocus
+    answers.
+    """
+    deadline = time.monotonic() + WARMUP_MAX_ELAPSED
+    delay    = min(2.0, WARMUP_BACKOFF_CAP)
+    attempt  = 0
+    while True:
+        attempt += 1
+        try:
+            fooocus.connect()
+            break
+        except Exception as e:
+            if time.monotonic() >= deadline:
+                print(
+                    f"[startup] Fooocus still unreachable after {WARMUP_MAX_ELAPSED}s "
+                    f"({attempt} attempts) — skipping re-queue: {e}"
+                )
+                return
+            print(f"[startup] Fooocus not reachable (attempt {attempt}); retrying in {delay:.0f}s: {e}")
+            time.sleep(delay)
+            delay = min(delay * 2, WARMUP_BACKOFF_CAP)
+    _requeue_startup_jobs()
+
 
 UOV_OPTIONS           = [m.value for m in UovMethod]
 PERFORMANCE_OPTIONS   = [p.value for p in PerformancePreset]
@@ -223,11 +265,31 @@ def on_image_select(evt: gr.SelectData, original_paths: list):
     """
     image_path = Path(original_paths[evt.index])
     log_path = image_path.parent / "log.html"
+    display_name = _filename_with_dimensions(image_path)
     try:
         meta = parse_log(log_path, image_path.name)
-        return str(image_path), image_path.name, meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, ""
+        return str(image_path), display_name, meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, ""
     except LogParseError as e:
-        return str(image_path), image_path.name, "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
+        return str(image_path), display_name, "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
+
+
+def _filename_with_dimensions(image_path: Path) -> str:
+    """Return the filename suffixed with its pixel dimensions, e.g. 'foo.png (1024x1536)'."""
+    try:
+        with Image.open(image_path) as img:
+            width, height = img.size
+        return f"{image_path.name} ({width}x{height})"
+    except Exception:
+        return image_path.name
+
+
+def on_clear_completed():
+    """Remove finished entries (done/failed/cancelled) from the queue table.
+
+    Active jobs ('queued' / 'processing') are kept so nothing in flight is lost.
+    """
+    queue.clear_completed()
+    return _queue_html()
 
 
 def on_action(value: str):
@@ -341,8 +403,9 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
 # Gradio UI
 # ---------------------------------------------------------------------------
 
-# Re-submit jobs that were still queued when the app last shut down
-_requeue_startup_jobs()
+# Connect to Fooocus and re-submit interrupted jobs in the background, so the
+# UI launches immediately instead of blocking on the /config handshake.
+threading.Thread(target=_startup_warmup, daemon=True).start()
 
 # Compute startup state once at module level (pure filesystem reads)
 _all_date_dirs = get_date_dirs(config.outputs_root)
@@ -391,7 +454,7 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
             neg_prompt = gr.Textbox(label="Negative Prompt", interactive=True, lines=2)
             seed_box = gr.Number(label="Seed", interactive=False)
         with gr.Column():
-            uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UOV_OPTIONS[0])
+            uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UovMethod.UPSCALE_2X.value)
             perf_radio = gr.Radio(
                 PERFORMANCE_OPTIONS,
                 label="Performance",
@@ -406,6 +469,7 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
             status_msg = gr.Markdown("")
 
     gr.Markdown("### Queue")
+    clear_completed_btn = gr.Button("🗑 Clear Completed", size="sm")
     queue_table = gr.HTML(value=_queue_html())
     # Invisible textbox used only to attach the queue_action API endpoint.
     # Cancel/Retry buttons call it directly via fetch; Gradio's DOM event
@@ -414,6 +478,9 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
 
     # Refresh queue every 3 s to reflect background polling updates
     gr.Timer(3).tick(fn=_queue_html, outputs=queue_table)
+
+    # "Clear Completed" — drop finished entries, keep active jobs
+    clear_completed_btn.click(fn=on_clear_completed, outputs=queue_table)
 
     # "Load more days" — appends next DAYS_PER_PAGE dirs to gallery + state
     load_more_btn.click(
