@@ -65,11 +65,18 @@ from enum import Enum
 from pathlib import Path
 
 import websockets
+import websockets.exceptions
 
 
 _POLL_INTERVAL = 5     # seconds between fn_index=68 polls
 _POLL_MAX      = 360   # 30 minutes max (360 × 5 s) — accommodates Quality 2x + double upscales
-_RUN_TIMEOUT   = 1830  # 30.5 min outer wait_for cap on the whole generation chain
+# Outer wait_for cap on the whole generation chain. Needs generous headroom beyond
+# _POLL_MAX * _POLL_INTERVAL (1800s): every poll opens its own WebSocket, so connect/
+# handshake overhead and any connection-error retries (each up to _OPEN_TIMEOUT) eat
+# into the budget without advancing poll_n's "done" check. A tight buffer here causes
+# this outer timeout to fire — and the job to be marked failed — before the polling
+# loop's own 360-attempt limit is reached, even though Fooocus may still be working.
+_RUN_TIMEOUT   = 2400  # 40 min: ~10 min buffer over the 30 min poll budget
 _OPEN_TIMEOUT  = 30
 _CLOSE_TIMEOUT = 10
 
@@ -186,7 +193,14 @@ class SubmittedJob:
         #    outputs: [html, preview_image, finished_gallery, all_gallery]
         none_streak = 0
         for poll_n in range(_POLL_MAX):
-            out68 = await self._call_fn(ws_url, session_hash, 68, [state67])
+            try:
+                out68 = await self._call_fn(ws_url, session_hash, 68, [state67])
+            except (OSError, asyncio.TimeoutError, websockets.exceptions.WebSocketException) as e:
+                # Transient WebSocket failure (dropped connection, handshake timeout
+                # while Fooocus is busy generating, etc.) — treat like queue_full and
+                # retry rather than letting it kill a job that may be minutes from done.
+                print(f"{tag} fn=68 poll {poll_n+1}/{_POLL_MAX}: connection error ({e}) — retrying")
+                out68 = None
             if out68 is None:
                 # Transient WebSocket failure — sleep and retry
                 none_streak += 1
