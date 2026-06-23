@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import threading
 import uuid
 import urllib.request
@@ -66,6 +67,8 @@ from pathlib import Path
 
 import websockets
 import websockets.exceptions
+
+from log_parser import ImageMetadata
 
 
 _POLL_INTERVAL = 5     # seconds between fn_index=68 polls
@@ -271,7 +274,8 @@ class FoocusConnection:
         # Fetch /config once and reuse it for both the fn67 and fn66 lookups;
         # the payload is large, so a single download halves the handshake cost.
         config = _fetch_config(self._url)
-        self._defaults, self._uov_index, self._format_index = _fetch_fn67_defaults(config)
+        self._defaults, self._uov_index, self._format_index, self._model_indices = \
+            _fetch_fn67_defaults(config)
         self._args66   = _fetch_fn66_defaults(config)
 
     def _encode_image(self, image_path: Path) -> str:
@@ -297,6 +301,7 @@ class FoocusConnection:
         negative_prompt: str,
         seed:            int,
         output_format:   OutputFormat = OutputFormat.PNG,
+        model_metadata:  ImageMetadata | None = None,
     ) -> SubmittedJob:
         file_data = self._encode_image(image_path)
 
@@ -314,6 +319,9 @@ class FoocusConnection:
         args[uov - 1] = "uov"            # sub-tab selector
         args[uov]     = str(uov_method)  # Upscale or Variation radio
         args[uov + 1] = file_data        # base64 data URI
+
+        if model_metadata is not None:
+            _apply_model_metadata(args, self._model_indices, model_metadata)
 
         return SubmittedJob(
             job_id=str(uuid.uuid4()),
@@ -381,16 +389,20 @@ def _fetch_fn66_defaults(config: dict) -> list:
     ]
 
 
-def _fetch_fn67_defaults(config: dict) -> tuple[list, int, int]:
+def _fetch_fn67_defaults(config: dict) -> tuple[list, int, int, dict]:
     """
     Given a parsed Fooocus /config, return:
-      (defaults, uov_index, format_index)
+      (defaults, uov_index, format_index, model_indices)
 
     `defaults` is the list of default values for every fn_index=67 input
     component (index 0 is the Gradio state).  `uov_index` is the position
     of the UOV method radio and `format_index` the position of the Output
     Format radio in that list — needed because the number of LoRA slots in
-    front of them varies with `default_max_lora_number`.
+    front of them varies with `default_max_lora_number`. `model_indices` is
+    a dict of positions (by label, see _locate_model_indices) used to
+    override the checkpoint/LoRA/sampling settings with those an original
+    image was generated with, so "Vary" reproduces it instead of using
+    whatever models are currently selected in the Fooocus UI.
     """
     comps  = {c["id"]: c for c in config.get("components", [])}
     dep67  = config["dependencies"][67]
@@ -422,7 +434,97 @@ def _fetch_fn67_defaults(config: dict) -> tuple[list, int, int]:
             "Fooocus UI may have changed."
         )
 
-    return defaults, uov_index, format_index
+    model_indices = _locate_model_indices(comps, input_ids)
+
+    return defaults, uov_index, format_index, model_indices
+
+
+def _locate_model_indices(comps: dict, input_ids: list) -> dict:
+    """
+    Locate fn_index=67 input positions for checkpoint/LoRA/sampling settings,
+    by component label rather than fixed offset — their position shifts with
+    `default_max_lora_number`, and the number of LoRA slots is itself
+    variable, so we can't compute them from uov_index the way the fixed
+    pre-LoRA-block fields are addressed.
+
+    Returns a dict with keys: base_model, refiner_model, refiner_switch,
+    sharpness, guidance_scale, adm_guidance (3-tuple of indices), clip_skip,
+    sampler, scheduler, vae, loras (list of (enable, dropdown, weight) index
+    tuples, one per "LoRA N" slot, ordered by N).
+    """
+    labels = {
+        i: (comps.get(cid, {}).get("props", {}).get("label") or "")
+        for i, cid in enumerate(input_ids)
+    }
+
+    def find(label: str) -> int | None:
+        for i, lbl in labels.items():
+            if lbl == label:
+                return i
+        return None
+
+    lora_slots = []
+    for i, lbl in labels.items():
+        if re.match(r"^LoRA \d+$", lbl):
+            lora_slots.append((i - 1, i, i + 1))  # enable, dropdown, weight
+    lora_slots.sort()
+
+    return {
+        "base_model":     find("Base Model (SDXL only)"),
+        "refiner_model":  find("Refiner (SDXL or SD 1.5)"),
+        "refiner_switch": find("Refiner Switch At"),
+        "sharpness":      find("Image Sharpness"),
+        "guidance_scale": find("Guidance Scale"),
+        "adm_guidance": (
+            find("Positive ADM Guidance Scaler"),
+            find("Negative ADM Guidance Scaler"),
+            find("ADM Guidance End At Step"),
+        ),
+        "clip_skip":      find("CLIP Skip"),
+        "sampler":        find("Sampler"),
+        "scheduler":      find("Scheduler"),
+        "vae":            find("VAE"),
+        "loras":          lora_slots,
+    }
+
+
+def _apply_model_metadata(args: list, model_indices: dict, metadata: ImageMetadata) -> None:
+    """Override args in-place with the model/sampling settings an image was
+    originally generated with, so e.g. "Vary" reproduces it faithfully
+    instead of using whichever checkpoint/LoRAs are currently selected in
+    the Fooocus UI."""
+    def set_if_known(key: str, value) -> None:
+        idx = model_indices.get(key)
+        if idx is not None and value is not None:
+            args[idx] = value
+
+    set_if_known("base_model", metadata.base_model)
+    if model_indices.get("refiner_model") is not None:
+        args[model_indices["refiner_model"]] = metadata.refiner_model or "None"
+    set_if_known("refiner_switch", metadata.refiner_switch)
+    set_if_known("sharpness", metadata.sharpness)
+    set_if_known("guidance_scale", metadata.guidance_scale)
+    set_if_known("clip_skip", metadata.clip_skip)
+    set_if_known("sampler", metadata.sampler)
+    set_if_known("scheduler", metadata.scheduler)
+    set_if_known("vae", metadata.vae)
+
+    if metadata.adm_guidance is not None:
+        for idx, value in zip(model_indices.get("adm_guidance", ()), metadata.adm_guidance):
+            if idx is not None:
+                args[idx] = value
+
+    lora_slots = model_indices.get("loras", [])
+    for slot_i, (enable_idx, dropdown_idx, weight_idx) in enumerate(lora_slots):
+        if slot_i < len(metadata.loras):
+            name, weight = metadata.loras[slot_i]
+            args[enable_idx]   = True
+            args[dropdown_idx] = name
+            args[weight_idx]   = weight
+        else:
+            # No LoRA used in this slot originally — disable it so a
+            # currently-enabled default LoRA doesn't leak into the result.
+            args[enable_idx] = False
 
 
 def _gallery_has_images(item) -> bool:
@@ -466,9 +568,13 @@ def submit_upscale_job(
     negative_prompt: str,
     seed:            int,
     output_format:   OutputFormat = OutputFormat.PNG,
+    model_metadata:  ImageMetadata | None = None,
 ) -> SubmittedJob:
     """Encode image and start generation. Returns immediately; runs in background."""
-    return conn.submit(image_path, uov_method, performance, positive_prompt, negative_prompt, seed, output_format)
+    return conn.submit(
+        image_path, uov_method, performance, positive_prompt, negative_prompt,
+        seed, output_format, model_metadata,
+    )
 
 
 def get_job_status(submitted_job: SubmittedJob) -> str:

@@ -26,7 +26,7 @@ from fooocus_client import (
     get_job_status,
     submit_upscale_job,
 )
-from log_parser import LogParseError, parse_log
+from log_parser import ImageMetadata, LogParseError, parse_log
 from queue_manager import QueueEntry, QueueManager
 
 # ---------------------------------------------------------------------------
@@ -42,6 +42,19 @@ queue = QueueManager(config.queue_file)
 
 # Maps job_id → live SubmittedJob so on_cancel can reach them.
 _active_jobs: dict[str, SubmittedJob] = {}
+
+
+def _model_metadata_for(image_path: Path) -> ImageMetadata | None:
+    """Look up the checkpoint/LoRA/sampling settings an image was originally
+    generated with, so re-submitting it (e.g. Vary) reproduces those settings
+    instead of whatever the Fooocus UI currently has selected. Returns None
+    if log.html is missing or has no entry for this image — callers fall
+    back to Fooocus's current UI defaults in that case.
+    """
+    try:
+        return parse_log(image_path.parent / "log.html", image_path.name)
+    except LogParseError:
+        return None
 
 
 def _requeue_startup_jobs() -> None:
@@ -61,6 +74,7 @@ def _requeue_startup_jobs() -> None:
                 entry.negative_prompt,
                 entry.seed,
                 OutputFormat(entry.output_format),
+                _model_metadata_for(image_path),
             )
             queue.update_job_id(entry.job_id, submitted.job_id)
             _start_polling(submitted)
@@ -355,6 +369,7 @@ def _do_retry(job_id: str):
             entry.negative_prompt,
             entry.seed,
             OutputFormat(entry.output_format),
+            _model_metadata_for(image_path),
         )
         print(f"[retry] submitted OK: new job_id={submitted.job_id!r}")
         queue.update_job_id(entry.job_id, submitted.job_id)
@@ -383,6 +398,7 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
             negative,
             int(seed),
             OutputFormat(output_format),
+            _model_metadata_for(image_path),
         )
         entry = QueueEntry(
             job_id=submitted.job_id,
@@ -441,7 +457,7 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
         value=_initial_paths,
         label="Output Images",
         columns=4,
-        height=400,
+        height=520,
         allow_preview=False,
     )
     load_more_btn = gr.Button(
