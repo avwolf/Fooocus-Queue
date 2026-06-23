@@ -60,8 +60,10 @@ import base64
 import json
 import re
 import threading
+import time
 import uuid
 import urllib.request
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
@@ -71,15 +73,28 @@ import websockets.exceptions
 from log_parser import ImageMetadata
 
 
-_POLL_INTERVAL = 5     # seconds between fn_index=68 polls
-_POLL_MAX      = 360   # 30 minutes max (360 × 5 s) — accommodates Quality 2x + double upscales
+def log(message: str) -> None:
+    """Print with a wall-clock timestamp, so console output can be correlated
+    with queue.json submitted_at times and output file timestamps."""
+    print(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}")
+
+
+_POLL_INTERVAL  = 5     # seconds between fn_index=68 polls
+_POLL_MAX       = 720   # 60 minutes max (720 × 5 s) — Fooocus has a single-worker queue
+                         # shared with manual UI use, so a queued job can sit waiting its
+                         # turn behind interactive generations for a long time before its
+                         # own fn=67/fn=68 calls even start running.
+_HEARTBEAT_EVERY = 12   # log a heartbeat line every _HEARTBEAT_EVERY polls (~1 min)
 # Outer wait_for cap on the whole generation chain. Needs generous headroom beyond
-# _POLL_MAX * _POLL_INTERVAL (1800s): every poll opens its own WebSocket, so connect/
+# _POLL_MAX * _POLL_INTERVAL (3600s): every poll opens its own WebSocket, so connect/
 # handshake overhead and any connection-error retries (each up to _OPEN_TIMEOUT) eat
 # into the budget without advancing poll_n's "done" check. A tight buffer here causes
 # this outer timeout to fire — and the job to be marked failed — before the polling
-# loop's own 360-attempt limit is reached, even though Fooocus may still be working.
-_RUN_TIMEOUT   = 2400  # 40 min: ~10 min buffer over the 30 min poll budget
+# loop's own attempt limit is reached, even though Fooocus may still be working.
+# fn=65/66/67 can also block for a long time waiting their turn behind manual UI use
+# on Fooocus's single-worker queue, before polling even starts — that time isn't
+# covered by _POLL_MAX at all, hence the large buffer below.
+_RUN_TIMEOUT   = 4500  # 75 min: ~15 min buffer over the 60 min poll budget
 _OPEN_TIMEOUT  = 30
 _CLOSE_TIMEOUT = 10
 
@@ -174,22 +189,32 @@ class SubmittedJob:
         ws_url       = self._url.replace("http://", "ws://")
         session_hash = uuid.uuid4().hex[:12]
         tag          = f"[job {self.job_id[:8]}]"
+        t_start      = time.monotonic()
+
+        def elapsed() -> float:
+            return time.monotonic() - t_start
 
         # 1. fn_index=65: session init (Generate button click, 0 inputs)
         out65 = await self._call_fn(ws_url, session_hash, 65, [])
         if out65 is None:
-            print(f"{tag} fn=65 returned None (queue_full or ws closed) — aborting")
+            log(f"{tag} fn=65 returned None (queue_full or ws closed) — aborting")
             return
+        log(f"{tag} fn=65 ok ({elapsed():.0f}s elapsed)")
 
         # 2. fn_index=66: seed/text update (2 inputs: Random checkbox, Seed)
         #    Required chain step — ignore the result; non-fatal if it fails.
         await self._call_fn(ws_url, session_hash, 66, self._args66)
+        log(f"{tag} fn=66 ok ({elapsed():.0f}s elapsed)")
 
-        # 3. fn_index=67: start generation (141 inputs → state)
+        # 3. fn_index=67: start generation (141 inputs → state). Fooocus runs a
+        # single-worker queue shared with manual UI use, so this call can block for
+        # a long time waiting its turn behind interactive generations before it
+        # even starts — that wait is silent (no message) until it returns.
         out67 = await self._call_fn(ws_url, session_hash, 67, self._args)
         if out67 is None:
-            print(f"{tag} fn=67 returned None (queue_full or ws closed) — aborting")
+            log(f"{tag} fn=67 returned None (queue_full or ws closed) — aborting")
             return
+        log(f"{tag} fn=67 ok ({elapsed():.0f}s elapsed) — generation started, polling for results")
         state67 = out67[0] if out67 else None
 
         # 4. fn_index=68: poll until Finished Images gallery is non-empty
@@ -202,24 +227,26 @@ class SubmittedJob:
                 # Transient WebSocket failure (dropped connection, handshake timeout
                 # while Fooocus is busy generating, etc.) — treat like queue_full and
                 # retry rather than letting it kill a job that may be minutes from done.
-                print(f"{tag} fn=68 poll {poll_n+1}/{_POLL_MAX}: connection error ({e}) — retrying")
+                log(f"{tag} fn=68 poll {poll_n+1}/{_POLL_MAX}: connection error ({e}) — retrying")
                 out68 = None
             if out68 is None:
                 # Transient WebSocket failure — sleep and retry
                 none_streak += 1
                 if none_streak in (1, 5, 20) or none_streak % 60 == 0:
-                    print(f"{tag} fn=68 poll {poll_n+1}/{_POLL_MAX}: None (streak={none_streak})")
+                    log(f"{tag} fn=68 poll {poll_n+1}/{_POLL_MAX}: None (streak={none_streak})")
                 await asyncio.sleep(_POLL_INTERVAL)
                 continue
             none_streak = 0
+            if (poll_n + 1) % _HEARTBEAT_EVERY == 0:
+                log(f"{tag} fn=68 poll {poll_n+1}/{_POLL_MAX}: still waiting ({elapsed():.0f}s elapsed)")
             finished = out68[2] if len(out68) > 2 else None
             gallery  = out68[3] if len(out68) > 3 else None
             if _gallery_has_images(finished) or _gallery_has_images(gallery):
                 self._status = "done"
-                print(f"{tag} done after {poll_n+1} polls")
+                log(f"{tag} done after {poll_n+1} polls ({elapsed():.0f}s elapsed)")
                 return
             await asyncio.sleep(_POLL_INTERVAL)
-        print(f"{tag} exhausted {_POLL_MAX} polls without seeing images — will be marked failed")
+        log(f"{tag} exhausted {_POLL_MAX} polls without seeing images — will be marked failed")
 
     def _start_thread(self) -> None:
         def run() -> None:
@@ -245,12 +272,12 @@ class SubmittedJob:
                     asyncio.wait_for(self._run_async(), timeout=_RUN_TIMEOUT)
                 )
             except asyncio.TimeoutError:
-                print(f"{tag} outer wait_for timed out after {_RUN_TIMEOUT}s — Fooocus may still be working")
+                log(f"{tag} outer wait_for timed out after {_RUN_TIMEOUT}s — Fooocus may still be working")
             except Exception as e:
-                print(f"{tag} unexpected exception: {type(e).__name__}: {e}")
+                log(f"{tag} unexpected exception: {type(e).__name__}: {e}")
             finally:
                 if self._status == "processing":
-                    print(f"{tag} marking failed (status was still 'processing' after _run_async exited)")
+                    log(f"{tag} marking failed (status was still 'processing' after _run_async exited)")
                     self._status = "failed"
                 _fooocus_semaphore.release()  # allow next queued job to proceed
                 loop.close()

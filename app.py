@@ -24,6 +24,7 @@ from fooocus_client import (
     PerformancePreset,
     create_client,
     get_job_status,
+    log,
     submit_upscale_job,
 )
 from log_parser import ImageMetadata, LogParseError, parse_log
@@ -111,12 +112,12 @@ def _startup_warmup() -> None:
             break
         except Exception as e:
             if time.monotonic() >= deadline:
-                print(
+                log(
                     f"[startup] Fooocus still unreachable after {WARMUP_MAX_ELAPSED}s "
                     f"({attempt} attempts) — skipping re-queue: {e}"
                 )
                 return
-            print(f"[startup] Fooocus not reachable (attempt {attempt}); retrying in {delay:.0f}s: {e}")
+            log(f"[startup] Fooocus not reachable (attempt {attempt}); retrying in {delay:.0f}s: {e}")
             time.sleep(delay)
             delay = min(delay * 2, WARMUP_BACKOFF_CAP)
     _requeue_startup_jobs()
@@ -341,22 +342,22 @@ def _do_cancel(job_id: str):
 def _do_retry(job_id: str):
     """Re-submit a failed job."""
     job_id = job_id.strip()
-    print(f"[retry] called: job_id={job_id!r}")
+    log(f"[retry] called: job_id={job_id!r}")
     if not job_id:
         return
 
     entry = queue.get_entry(job_id)
     if entry is None:
-        print(f"[retry] bailing: entry not found for {job_id!r}")
+        log(f"[retry] bailing: entry not found for {job_id!r}")
         return
     if not entry.image_path:
-        print(f"[retry] bailing: no image_path on entry {job_id!r}")
+        log(f"[retry] bailing: no image_path on entry {job_id!r}")
         return
 
     image_path = Path(entry.image_path)
-    print(f"[retry] image_path={image_path!r}  exists={image_path.exists()}")
+    log(f"[retry] image_path={image_path!r}  exists={image_path.exists()}")
     if not image_path.exists():
-        print(f"[retry] bailing: image not found at {image_path!r}")
+        log(f"[retry] bailing: image not found at {image_path!r}")
         return
 
     try:
@@ -371,7 +372,7 @@ def _do_retry(job_id: str):
             OutputFormat(entry.output_format),
             _model_metadata_for(image_path),
         )
-        print(f"[retry] submitted OK: new job_id={submitted.job_id!r}")
+        log(f"[retry] submitted OK: new job_id={submitted.job_id!r}")
         queue.update_job_id(entry.job_id, submitted.job_id)
         queue.update_status(submitted.job_id, "queued")
         _start_polling(submitted)
