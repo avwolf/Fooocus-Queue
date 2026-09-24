@@ -304,6 +304,11 @@ class FoocusConnection:
         self._defaults, self._uov_index, self._format_index, self._model_indices = \
             _fetch_fn67_defaults(config)
         self._args66   = _fetch_fn66_defaults(config)
+        # Every style Fooocus knows, and its launch-time default selection
+        # (what a job gets when neither the log nor the user supplies styles).
+        styles_idx = self._model_indices.get("styles")
+        self.style_choices  = _fetch_style_choices(config, styles_idx)
+        self.default_styles = list(self._defaults[styles_idx] or []) if styles_idx is not None else []
 
     def _encode_image(self, image_path: Path) -> str:
         """
@@ -319,6 +324,18 @@ class FoocusConnection:
         b64    = base64.b64encode(data).decode("ascii")
         return f"data:{mime};base64,{b64}"
 
+    def _known_styles(self, styles: list[str]) -> list[str]:
+        """Drop styles this Fooocus install doesn't have (e.g. renamed since
+        the original image was made) — Fooocus fails the whole job on an
+        unknown style name rather than skipping it."""
+        if not self.style_choices:
+            return list(styles)
+        known   = [s for s in styles if s in self.style_choices]
+        dropped = [s for s in styles if s not in self.style_choices]
+        if dropped:
+            log(f"[styles] ignoring styles unknown to Fooocus: {dropped}")
+        return known
+
     def submit(
         self,
         image_path:      Path,
@@ -329,7 +346,14 @@ class FoocusConnection:
         seed:            int,
         output_format:   OutputFormat = OutputFormat.PNG,
         model_metadata:  ImageMetadata | None = None,
+        styles:          list[str] | None = None,
     ) -> SubmittedJob:
+        """Build the fn_index=67 args and start the job.
+
+        Styles resolve in priority order: `styles` (an explicit user choice,
+        where [] means "no styles"), then the original image's styles from
+        `model_metadata`, then Fooocus's launch-time default selection.
+        """
         file_data = self._encode_image(image_path)
 
         # State at [0], regular params follow. UOV block position is dynamic
@@ -349,6 +373,12 @@ class FoocusConnection:
 
         if model_metadata is not None:
             _apply_model_metadata(args, self._model_indices, model_metadata)
+
+        styles_idx = self._model_indices.get("styles")
+        if styles_idx is not None:
+            if styles is not None:
+                args[styles_idx] = list(styles)
+            args[styles_idx] = self._known_styles(args[styles_idx] or [])
 
         return SubmittedJob(
             job_id=str(uuid.uuid4()),
@@ -391,6 +421,17 @@ class LazyFoocusConnection:
     def submit(self, *args, **kwargs) -> SubmittedJob:
         return self.connect().submit(*args, **kwargs)
 
+    def style_options(self) -> tuple[list[str], list[str]]:
+        """Return (all style names, default selection) without blocking.
+
+        Both are empty until the warm-up handshake has connected — callers
+        on the UI thread must not stall on an unreachable Fooocus.
+        """
+        conn = self._conn
+        if conn is None:
+            return [], []
+        return list(conn.style_choices), list(conn.default_styles)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -414,6 +455,17 @@ def _fetch_fn66_defaults(config: dict) -> list:
         comps.get(cid, {}).get("props", {}).get("value")
         for cid in dep66["inputs"]
     ]
+
+
+def _fetch_style_choices(config: dict, styles_index: int | None) -> list[str]:
+    """Return every style name offered by the fn_index=67 Selected Styles
+    checkbox group, in Fooocus's own order ([] if it wasn't located)."""
+    if styles_index is None:
+        return []
+    comps   = {c["id"]: c for c in config.get("components", [])}
+    cid     = config["dependencies"][67]["inputs"][styles_index]
+    choices = comps.get(cid, {}).get("props", {}).get("choices") or []
+    return [c[0] if isinstance(c, (list, tuple)) else c for c in choices]
 
 
 def _fetch_fn67_defaults(config: dict) -> tuple[list, int, int, dict]:
@@ -476,8 +528,8 @@ def _locate_model_indices(comps: dict, input_ids: list) -> dict:
 
     Returns a dict with keys: base_model, refiner_model, refiner_switch,
     sharpness, guidance_scale, adm_guidance (3-tuple of indices), clip_skip,
-    sampler, scheduler, vae, loras (list of (enable, dropdown, weight) index
-    tuples, one per "LoRA N" slot, ordered by N).
+    sampler, scheduler, vae, styles, loras (list of (enable, dropdown, weight)
+    index tuples, one per "LoRA N" slot, ordered by N).
     """
     labels = {
         i: (comps.get(cid, {}).get("props", {}).get("label") or "")
@@ -511,6 +563,7 @@ def _locate_model_indices(comps: dict, input_ids: list) -> dict:
         "sampler":        find("Sampler"),
         "scheduler":      find("Scheduler"),
         "vae":            find("VAE"),
+        "styles":         find("Selected Styles"),
         "loras":          lora_slots,
     }
 
@@ -535,6 +588,7 @@ def _apply_model_metadata(args: list, model_indices: dict, metadata: ImageMetada
     set_if_known("sampler", metadata.sampler)
     set_if_known("scheduler", metadata.scheduler)
     set_if_known("vae", metadata.vae)
+    set_if_known("styles", metadata.styles)
 
     if metadata.adm_guidance is not None:
         for idx, value in zip(model_indices.get("adm_guidance", ()), metadata.adm_guidance):
@@ -596,11 +650,12 @@ def submit_upscale_job(
     seed:            int,
     output_format:   OutputFormat = OutputFormat.PNG,
     model_metadata:  ImageMetadata | None = None,
+    styles:          list[str] | None = None,
 ) -> SubmittedJob:
     """Encode image and start generation. Returns immediately; runs in background."""
     return conn.submit(
         image_path, uov_method, performance, positive_prompt, negative_prompt,
-        seed, output_format, model_metadata,
+        seed, output_format, model_metadata, styles,
     )
 
 

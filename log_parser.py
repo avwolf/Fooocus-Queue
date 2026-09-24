@@ -1,3 +1,4 @@
+import ast
 import re
 from bs4 import BeautifulSoup
 from dataclasses import dataclass, field
@@ -29,6 +30,10 @@ class ImageMetadata:
     sampler: str | None = None
     scheduler: str | None = None
     vae: str | None = None
+    # Fooocus styles the image was generated with, in selection order. Order
+    # matters: Fooocus concatenates each style's prompt template in turn.
+    # None (not []) when absent/unparseable, since [] means "no styles".
+    styles: list[str] | None = None
 
 
 class LogParseError(Exception):
@@ -128,4 +133,19 @@ def _extract_metadata(container, image_filename: str) -> ImageMetadata:
         sampler=metadata.get("Sampler"),
         scheduler=metadata.get("Scheduler"),
         vae=metadata.get("VAE"),
+        styles=_parse_styles(metadata.get("Styles")),
     )
+
+
+def _parse_styles(value: str | None) -> list[str] | None:
+    """Parse the Styles cell, which Fooocus writes as a Python list repr,
+    e.g. "['Fooocus V2', 'Fooocus Masterpiece']"."""
+    if value is None:
+        return None
+    try:
+        styles = ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return None
+    if not isinstance(styles, list) or not all(isinstance(s, str) for s in styles):
+        return None
+    return styles

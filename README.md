@@ -111,7 +111,16 @@ trade-off for this particular job.
 | Lightning | Fastest preset |
 | Hyper-SD | Alternative fast preset |
 
-**6. Submit**
+**6. Check styles (optional)**
+
+Selecting an image also loads the Fooocus styles it was generated with (from `log.html`),
+so the upscale keeps the original look instead of picking up whatever styles are Fooocus's
+current defaults.  The line above the Submit button shows which styles will be sent and
+whether they are inherited or overridden.  To change them, open the **Style** tab: search
+and tick/untick styles, **↺ Reset to original** to undo, or **Clear all** to send none.
+*Upscale (Fast 2x)* does not run diffusion, so styles have no effect on it.
+
+**7. Submit**
 
 Click **Submit for Upscaling**.  The job appears in the queue table with status
 `queued`.  It moves to `processing` when Fooocus starts generating and to `done` when

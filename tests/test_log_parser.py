@@ -46,3 +46,21 @@ def test_malformed_log_html_raises_log_parse_error(tmp_path):
     )
     with pytest.raises(LogParseError, match="Missing fields"):
         parse_log(bad_log, KNOWN_FILENAME)
+
+
+def test_parse_known_image_has_styles_in_logged_order():
+    meta = parse_log(FIXTURE, KNOWN_FILENAME)
+    assert meta.styles is not None
+    assert meta.styles[:3] == ["Fooocus V2", "Fooocus Enhance", "Fooocus Sharp"]
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("['Fooocus V2', 'Fooocus Masterpiece']", ["Fooocus V2", "Fooocus Masterpiece"]),
+    ("[]", []),
+    (None, None),
+    ("not a list", None),
+    ("[1, 2]", None),
+])
+def test_parse_styles(value, expected):
+    from log_parser import _parse_styles
+    assert _parse_styles(value) == expected

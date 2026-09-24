@@ -76,6 +76,7 @@ def _requeue_startup_jobs() -> None:
                 entry.seed,
                 OutputFormat(entry.output_format),
                 _model_metadata_for(image_path),
+                entry.styles,
             )
             queue.update_job_id(entry.job_id, submitted.job_id)
             _start_polling(submitted)
@@ -286,11 +287,62 @@ def on_image_select(evt: gr.SelectData, original_paths: list):
     image_path = Path(original_paths[evt.index])
     log_path = image_path.parent / "log.html"
     display_name = _filename_with_dimensions(image_path)
+    all_styles, default_styles = fooocus.style_options()
     try:
         meta = parse_log(log_path, image_path.name)
-        return str(image_path), display_name, meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, ""
+        fields = (meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, "")
+        original_styles = meta.styles
     except LogParseError as e:
-        return str(image_path), display_name, "", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}"
+        fields = ("", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}")
+        original_styles = None
+
+    if original_styles is not None and all_styles:
+        # Mirror what submit will actually send: unknown styles get dropped.
+        original_styles = [s for s in original_styles if s in all_styles]
+    chosen = original_styles if original_styles is not None else default_styles
+    style_update = gr.update(choices=_style_choices(chosen), value=chosen)
+    return (str(image_path), display_name, *fields,
+            style_update, original_styles, "", _style_summary(chosen, original_styles))
+
+
+def _style_choices(selected: list[str], query: str = "") -> list[str]:
+    """Checkbox choices for the Style tab: the selected styles first, in
+    selection order (as Fooocus itself lists them), then every other style
+    Fooocus knows that matches the search box."""
+    all_styles, _ = fooocus.style_options()
+    q = query.strip().lower()
+    return list(selected) + [s for s in all_styles if s not in selected and q in s.lower()]
+
+
+def _style_summary(chosen: list[str] | None, original: list[str] | None) -> str:
+    """One-line description of the styles a submit will send, and where they came from."""
+    chosen = chosen or []
+    if original is None and not chosen:
+        return "**Styles:** Fooocus defaults *(original image's styles unknown)*"
+    if original is not None:
+        source = "inherited from original" if chosen == original else "overridden"
+    else:
+        _, defaults = fooocus.style_options()
+        source = "Fooocus defaults \u2014 original unknown" if chosen == defaults else "overridden"
+    names = ", ".join(chosen) if chosen else "none"
+    return f"**Styles** ({len(chosen)}, {source}): {names}"
+
+
+def on_style_search(query: str, chosen: list[str]):
+    """Filter the unselected styles by name; selected ones always stay visible."""
+    return gr.update(choices=_style_choices(chosen or [], query))
+
+
+def on_style_reset(original: list[str] | None):
+    """Restore the original image's styles (or Fooocus defaults if unknown)."""
+    _, defaults = fooocus.style_options()
+    chosen = original if original is not None else defaults
+    return gr.update(choices=_style_choices(chosen), value=chosen), ""
+
+
+def on_style_clear():
+    """Deselect every style, so the job runs with no style templates at all."""
+    return gr.update(choices=_style_choices([]), value=[]), ""
 
 
 def _filename_with_dimensions(image_path: Path) -> str:
@@ -371,6 +423,7 @@ def _do_retry(job_id: str):
             entry.seed,
             OutputFormat(entry.output_format),
             _model_metadata_for(image_path),
+            entry.styles,
         )
         log(f"[retry] submitted OK: new job_id={submitted.job_id!r}")
         queue.update_job_id(entry.job_id, submitted.job_id)
@@ -381,13 +434,20 @@ def _do_retry(job_id: str):
         traceback.print_exc()
 
 
-def on_submit(selected_path_str, positive, negative, seed, uov_method, performance, output_format):
+def on_submit(selected_path_str, positive, negative, seed, uov_method, performance, output_format,
+              chosen_styles, original_styles):
     """Submit the selected image to Fooocus and add it to the queue."""
     if not selected_path_str:
         return "No image selected.", _queue_html()
 
     image_path = Path(selected_path_str)
     filename = image_path.name
+    # An empty selection with no known original means the Style tab was never
+    # populated (Fooocus unreachable at select time) — let Fooocus apply its
+    # defaults rather than sending an explicit "no styles".
+    styles = list(chosen_styles or [])
+    if original_styles is None and not styles:
+        styles = None
 
     try:
         submitted = submit_upscale_job(
@@ -400,6 +460,7 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
             int(seed),
             OutputFormat(output_format),
             _model_metadata_for(image_path),
+            styles,
         )
         entry = QueueEntry(
             job_id=submitted.job_id,
@@ -413,10 +474,12 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
             submitted_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             image_path=str(image_path),
             output_format=output_format,
+            styles=styles,
         )
         queue.add(entry)
         _start_polling(submitted)
-        return f"\u2713 Submitted: {filename} ({uov_method}, {performance})", _queue_html()
+        style_note = "default styles" if styles is None else f"{len(styles)} styles"
+        return f"\u2713 Submitted: {filename} ({uov_method}, {performance}, {style_note})", _queue_html()
     except Exception as e:
         return f"\u2717 Submission failed: {e}", _queue_html()
 
@@ -437,6 +500,11 @@ _initial_paths = images_for_dirs(_all_date_dirs[:_initial_loaded])
 _CSS = """
 .thumbnail-item.selected {
     box-shadow: inset 0 0 0 2px var(--color-accent), var(--shadow-drop) !important;
+}
+/* Fooocus ships ~280 styles; keep the list from pushing Submit off-screen. */
+#style-checks .wrap {
+    max-height: 360px;
+    overflow-y: auto;
 }
 """
 
@@ -470,25 +538,46 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
 
     # --- metadata + submit panel ---
     filename_display = gr.Textbox(label="Selected Image", interactive=False, value="")
-    with gr.Row():
-        with gr.Column():
-            pos_prompt = gr.Textbox(label="Positive Prompt", interactive=True, lines=3)
-            neg_prompt = gr.Textbox(label="Negative Prompt", interactive=True, lines=2)
-            seed_box = gr.Number(label="Seed", interactive=False)
-        with gr.Column():
-            uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UovMethod.UPSCALE_2X.value)
-            perf_radio = gr.Radio(
-                PERFORMANCE_OPTIONS,
-                label="Performance",
-                value=PerformancePreset.SPEED.value,
+    # Styles the selected image was generated with (None if unknown), for
+    # "Reset to original" and the inherited/overridden summary.
+    original_styles_state = gr.State(None)
+    with gr.Tabs():
+        with gr.Tab("Settings"):
+            with gr.Row():
+                with gr.Column():
+                    pos_prompt = gr.Textbox(label="Positive Prompt", interactive=True, lines=3)
+                    neg_prompt = gr.Textbox(label="Negative Prompt", interactive=True, lines=2)
+                    seed_box = gr.Number(label="Seed", interactive=False)
+                with gr.Column():
+                    uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UovMethod.UPSCALE_2X.value)
+                    perf_radio = gr.Radio(
+                        PERFORMANCE_OPTIONS,
+                        label="Performance",
+                        value=PerformancePreset.SPEED.value,
+                    )
+                    format_radio = gr.Radio(
+                        OUTPUT_FORMAT_OPTIONS,
+                        label="Output Format",
+                        value=OutputFormat.WEBP.value,
+                    )
+        with gr.Tab("Style"):
+            gr.Markdown(
+                "Selecting an image loads the styles it was generated with. "
+                "Change them here to override. Styles apply in the order listed; "
+                "*Fooocus V2* is prompt expansion. *Upscale (Fast 2x)* ignores styles."
             )
-            format_radio = gr.Radio(
-                OUTPUT_FORMAT_OPTIONS,
-                label="Output Format",
-                value=OutputFormat.WEBP.value,
+            with gr.Row():
+                style_search = gr.Textbox(
+                    placeholder="Search styles…", show_label=False, container=False, scale=4,
+                )
+                style_reset_btn = gr.Button("↺ Reset to original", size="sm", scale=1)
+                style_clear_btn = gr.Button("Clear all", size="sm", scale=1)
+            style_checks = gr.CheckboxGroup(
+                choices=[], value=[], label="Selected Styles", elem_id="style-checks",
             )
-            submit_btn = gr.Button("Submit for Upscaling", variant="primary")
-            status_msg = gr.Markdown("")
+    style_summary = gr.Markdown("")
+    submit_btn = gr.Button("Submit for Upscaling", variant="primary")
+    status_msg = gr.Markdown("")
 
     gr.Markdown("### Queue")
     clear_completed_btn = gr.Button("🗑 Clear Completed", size="sm")
@@ -521,12 +610,28 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
     gallery.select(
         fn=on_image_select,
         inputs=[gallery_paths],          # real paths, not gallery's temp copies
-        outputs=[selected_path, filename_display, pos_prompt, neg_prompt, seed_box, perf_radio, status_msg],
+        outputs=[selected_path, filename_display, pos_prompt, neg_prompt, seed_box, perf_radio, status_msg,
+                 style_checks, original_styles_state, style_search, style_summary],
     )
+
+    # --- Style tab ---
+    style_checks.change(
+        fn=_style_summary,
+        inputs=[style_checks, original_styles_state],
+        outputs=style_summary,
+    )
+    style_search.change(
+        fn=on_style_search,
+        inputs=[style_search, style_checks],
+        outputs=style_checks,
+    )
+    style_reset_btn.click(fn=on_style_reset, inputs=[original_styles_state], outputs=[style_checks, style_search])
+    style_clear_btn.click(fn=on_style_clear, outputs=[style_checks, style_search])
 
     submit_btn.click(
         fn=on_submit,
-        inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio, perf_radio, format_radio],
+        inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio, perf_radio, format_radio,
+                style_checks, original_styles_state],
         outputs=[status_msg, queue_table],
     )
 
