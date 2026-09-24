@@ -18,6 +18,7 @@ class QueueEntry:
     negative_prompt: str = ""   # stored so jobs can be re-queued on next launch
     image_path: str = ""        # absolute path to source image; empty for legacy entries
     output_format: str = "png"  # Fooocus Output Format radio; png keeps old entries valid
+    styles: list[str] | None = None  # Fooocus styles sent; None = inherit from log.html (legacy entries)
 
 
 _TERMINAL_STATUSES = {"done", "failed", "cancelled", "submitted (previous session)"}

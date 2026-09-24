@@ -191,3 +191,15 @@ def test_as_table_rows_newest_first(tmp_path):
     # Newest (last added) appears first
     assert rows[0][0] == "image_second.png"
     assert rows[1][0] == "image_first.png"
+
+
+def test_styles_round_trip_and_default_to_none(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    styled = make_entry("styled")
+    styled.styles = ["Fooocus V2", "Fooocus Masterpiece"]
+    qm.add(styled)
+    qm.add(make_entry("legacy"))
+    reloaded = QueueManager(qf)
+    assert reloaded.get_entry("styled").styles == ["Fooocus V2", "Fooocus Masterpiece"]
+    assert reloaded.get_entry("legacy").styles is None
