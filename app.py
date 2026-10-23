@@ -325,10 +325,10 @@ def on_image_select(evt: gr.SelectData, original_paths: list):
     all_styles, default_styles = fooocus.style_options()
     try:
         meta = parse_log(log_path, image_path.name)
-        fields = (meta.positive_prompt, meta.negative_prompt, meta.seed, meta.performance, "")
+        fields = (meta.positive_prompt, meta.negative_prompt, str(meta.seed), meta.performance, "")
         original_styles = meta.styles
     except LogParseError as e:
-        fields = ("", "", 0, PerformancePreset.SPEED.value, f"\u26a0 {e}")
+        fields = ("", "", "0", PerformancePreset.SPEED.value, f"\u26a0 {e}")
         original_styles = None
 
     if original_styles is not None and all_styles:
@@ -618,7 +618,10 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
                 with gr.Column():
                     pos_prompt = gr.Textbox(label="Positive Prompt", interactive=True, lines=3)
                     neg_prompt = gr.Textbox(label="Negative Prompt", interactive=True, lines=2)
-                    seed_box = gr.Number(label="Seed", interactive=False)
+                    # Textbox, not gr.Number: Fooocus seeds are up to 2**63, and a
+                    # Number round-trips through a float, which rounds them to the
+                    # nearest representable value (so adjacent seeds collapse).
+                    seed_box = gr.Textbox(label="Seed", interactive=False)
                 with gr.Column():
                     uov_radio = gr.Radio(UOV_OPTIONS, label="Operation", value=UovMethod.UPSCALE_2X.value)
                     perf_radio = gr.Radio(
