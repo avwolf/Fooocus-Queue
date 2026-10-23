@@ -7,7 +7,6 @@ Then open:  http://localhost:7860
 from __future__ import annotations
 
 import html as html_module
-import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -29,12 +28,12 @@ from fooocus_client import (
 )
 from log_parser import ImageMetadata, LogParseError, parse_log
 from queue_manager import QueueEntry, QueueManager
+from training import DATE_DIR_RE, add_to_training_set, locate_output, validate_trigger
 
 # ---------------------------------------------------------------------------
 # App-level singletons
 # ---------------------------------------------------------------------------
 
-DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DAYS_PER_PAGE = 3  # how many date-dirs to load initially and per "load more" click
 
 config = load_config()
@@ -173,9 +172,42 @@ def _start_polling(submitted: SubmittedJob) -> None:
             queue.update_status(submitted.job_id, status)
             if status in ("done", "failed", "cancelled"):
                 _active_jobs.pop(submitted.job_id, None)
+                if status == "done":
+                    _copy_job_to_training(submitted)
                 break
 
     threading.Thread(target=poll, daemon=True).start()
+
+
+def _copy_job_to_training(submitted: SubmittedJob) -> None:
+    """Copy a finished job's result(s) into the training set, if it was flagged.
+
+    Never raises: a copy failure is logged and shown in the queue's Training
+    column, but must not kill the polling thread or change the job's status.
+    """
+    entry = queue.get_entry(submitted.job_id)
+    if not entry or not entry.training_trigger:
+        return
+    tag = f"[training] job {submitted.job_id[:8]}"
+    try:
+        if not submitted.output_paths:
+            log(f"{tag}: no output paths captured — nothing to copy")
+            queue.update_training_status(submitted.job_id, "copy failed")
+            return
+        ok = True
+        for gallery_path in submitted.output_paths:
+            source = locate_output(gallery_path, config.outputs_root)
+            if source is None:
+                log(f"{tag}: output not found: {gallery_path}")
+                ok = False
+                continue
+            dest = add_to_training_set(source, entry.positive_prompt, entry.training_trigger,
+                                       config.training_dir)
+            log(f"{tag}: {source} -> {dest}")
+        queue.update_training_status(submitted.job_id, "copied" if ok else "copy failed")
+    except Exception as e:
+        log(f"{tag}: copy failed: {type(e).__name__}: {e}")
+        queue.update_training_status(submitted.job_id, "copy failed")
 
 
 def _action_js(action: str, job_id: str) -> str:
@@ -221,12 +253,14 @@ def _queue_html() -> str:
                 f"<button onclick=\"{_action_js('retry', e.job_id)}\" "
                 f"style='font-size:0.8em;padding:2px 8px;cursor:pointer;'>Retry</button>"
             )
+        training = f"{e.training_trigger}: {e.training_status}" if e.training_trigger else ""
         rows += (
             "<tr>"
             f"<td style='padding:4px 8px;'>{html_module.escape(e.image_filename)}</td>"
             f"<td style='padding:4px 8px;'>{html_module.escape(e.uov_method)}</td>"
             f"<td style='padding:4px 8px;'>{html_module.escape(e.performance)}</td>"
             f"<td style='padding:4px 8px;'>{html_module.escape(e.status)}</td>"
+            f"<td style='padding:4px 8px;'>{html_module.escape(training)}</td>"
             f"<td style='padding:4px 8px;white-space:nowrap;'>{html_module.escape(e.submitted_at)}</td>"
             f"<td style='padding:4px 8px;'>{action_cell}</td>"
             "</tr>"
@@ -238,6 +272,7 @@ def _queue_html() -> str:
         "<th style='text-align:left;padding:4px 8px;'>Operation</th>"
         "<th style='text-align:left;padding:4px 8px;'>Performance</th>"
         "<th style='text-align:left;padding:4px 8px;'>Status</th>"
+        "<th style='text-align:left;padding:4px 8px;'>Training</th>"
         "<th style='text-align:left;padding:4px 8px;'>Submitted</th>"
         "<th></th>"
         "</tr>"
@@ -428,17 +463,46 @@ def _do_retry(job_id: str):
         log(f"[retry] submitted OK: new job_id={submitted.job_id!r}")
         queue.update_job_id(entry.job_id, submitted.job_id)
         queue.update_status(submitted.job_id, "queued")
+        if entry.training_trigger:
+            queue.update_training_status(submitted.job_id, "pending")
         _start_polling(submitted)
     except Exception:
         import traceback
         traceback.print_exc()
 
 
+def on_train_toggle(add_to_training: bool):
+    """Show the trigger word box and direct-add button only while the training
+    checkbox is ticked; unticking clears the trigger word."""
+    if add_to_training:
+        return gr.update(visible=True), gr.update(visible=True)
+    return gr.update(value="", visible=False), gr.update(visible=False)
+
+
+def on_add_to_training(selected_path_str, positive, trigger):
+    """Copy the selected gallery image straight into the training set, no job."""
+    if not selected_path_str:
+        return "No image selected."
+    trigger = (trigger or "").strip()
+    if err := validate_trigger(trigger):
+        return f"✗ {err}"
+    try:
+        dest = add_to_training_set(Path(selected_path_str), positive or "", trigger, config.training_dir)
+        log(f"[training] added {selected_path_str} -> {dest}")
+        return f"✓ Added to training set: {dest}"
+    except Exception as e:
+        return f"✗ Could not add to training set: {e}"
+
+
 def on_submit(selected_path_str, positive, negative, seed, uov_method, performance, output_format,
-              chosen_styles, original_styles):
+              chosen_styles, original_styles, add_to_training, trigger):
     """Submit the selected image to Fooocus and add it to the queue."""
     if not selected_path_str:
         return "No image selected.", _queue_html()
+
+    trigger = (trigger or "").strip() if add_to_training else ""
+    if add_to_training and (err := validate_trigger(trigger)):
+        return f"✗ {err}", _queue_html()
 
     image_path = Path(selected_path_str)
     filename = image_path.name
@@ -475,11 +539,15 @@ def on_submit(selected_path_str, positive, negative, seed, uov_method, performan
             image_path=str(image_path),
             output_format=output_format,
             styles=styles,
+            training_trigger=trigger,
+            training_status="pending" if trigger else "",
         )
         queue.add(entry)
         _start_polling(submitted)
         style_note = "default styles" if styles is None else f"{len(styles)} styles"
-        return f"\u2713 Submitted: {filename} ({uov_method}, {performance}, {style_note})", _queue_html()
+        training_note = f" \u2192 training/{trigger}" if trigger else ""
+        return (f"\u2713 Submitted: {filename} ({uov_method}, {performance}, {style_note}){training_note}",
+                _queue_html())
     except Exception as e:
         return f"\u2717 Submission failed: {e}", _queue_html()
 
@@ -563,6 +631,16 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
                         label="Output Format",
                         value=OutputFormat.WEBP.value,
                     )
+                    gr.Markdown("#### Training Set")
+                    # Deliberately not an output of gallery.select / on_submit, so
+                    # the checkbox and trigger word persist across a batch.
+                    train_check = gr.Checkbox(
+                        label="Add to training set",
+                        value=False,
+                        info=f"Copies results into a trigger-word subfolder of {config.training_dir}",
+                    )
+                    trigger_box = gr.Textbox(label="Trigger word", visible=False)
+                    add_train_btn = gr.Button("Add selected to training set", size="sm", visible=False)
         with gr.Tab("Style"):
             gr.Markdown(
                 "Selecting an image loads the styles it was generated with. "
@@ -629,10 +707,18 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
     style_reset_btn.click(fn=on_style_reset, inputs=[original_styles_state], outputs=[style_checks, style_search])
     style_clear_btn.click(fn=on_style_clear, outputs=[style_checks, style_search])
 
+    # --- Training set ---
+    train_check.change(fn=on_train_toggle, inputs=[train_check], outputs=[trigger_box, add_train_btn])
+    add_train_btn.click(
+        fn=on_add_to_training,
+        inputs=[selected_path, pos_prompt, trigger_box],
+        outputs=status_msg,
+    )
+
     submit_btn.click(
         fn=on_submit,
         inputs=[selected_path, pos_prompt, neg_prompt, seed_box, uov_radio, perf_radio, format_radio,
-                style_checks, original_styles_state],
+                style_checks, original_styles_state, train_check, trigger_box],
         outputs=[status_msg, queue_table],
     )
 
