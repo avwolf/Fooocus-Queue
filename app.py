@@ -501,7 +501,7 @@ _CSS = """
 .thumbnail-item.selected {
     box-shadow: inset 0 0 0 2px var(--color-accent), var(--shadow-drop) !important;
 }
-/* Fooocus ships ~280 styles; keep the list from pushing Submit off-screen. */
+/* Fooocus ships ~280 styles; keep the list from pushing the queue off-screen. */
 #style-checks .wrap {
     max-height: 360px;
     overflow-y: auto;
@@ -541,6 +541,9 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
     # Styles the selected image was generated with (None if unknown), for
     # "Reset to original" and the inherited/overridden summary.
     original_styles_state = gr.State(None)
+    # Submit sits above the tabs so it stays above the fold.
+    submit_btn = gr.Button("Submit for Upscaling", variant="primary")
+    status_msg = gr.Markdown("")
     with gr.Tabs():
         with gr.Tab("Settings"):
             with gr.Row():
@@ -576,8 +579,6 @@ with gr.Blocks(title="Fooocus Upscale Queue") as demo:
                 choices=[], value=[], label="Selected Styles", elem_id="style-checks",
             )
     style_summary = gr.Markdown("")
-    submit_btn = gr.Button("Submit for Upscaling", variant="primary")
-    status_msg = gr.Markdown("")
 
     gr.Markdown("### Queue")
     clear_completed_btn = gr.Button("🗑 Clear Completed", size="sm")
