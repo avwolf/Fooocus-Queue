@@ -149,6 +149,8 @@ class SubmittedJob:
         self._args         = args
         self._args66       = args66
         self._cancel_event = threading.Event()
+        # Result image paths (Gradio temp-cache copies), set just before "done".
+        self.output_paths: list[str] = []
         self._start_thread()
 
     # ------------------------------------------------------------------
@@ -242,6 +244,9 @@ class SubmittedJob:
             finished = out68[2] if len(out68) > 2 else None
             gallery  = out68[3] if len(out68) > 3 else None
             if _gallery_has_images(finished) or _gallery_has_images(gallery):
+                # Set before status, so a poller that sees "done" sees the paths too.
+                self.output_paths = _gallery_image_paths(finished) or _gallery_image_paths(gallery)
+                log(f"{tag} outputs: {self.output_paths}")
                 self._status = "done"
                 log(f"{tag} done after {poll_n+1} polls ({elapsed():.0f}s elapsed)")
                 return
@@ -608,22 +613,36 @@ def _apply_model_metadata(args: list, model_indices: dict, metadata: ImageMetada
             args[enable_idx] = False
 
 
-def _gallery_has_images(item) -> bool:
+def _gallery_image_paths(item) -> list[str]:
     """
-    Return True if a gallery output item contains at least one image.
+    Return the file paths in a gallery output item, in order.
 
     Gradio 3.x may return the gallery as:
       - a plain list of file dicts  → [{"name": "path/img.png", ...}, ...]
+      - a list of [file, caption]   → [[{"name": "path/img.png", ...}, None], ...]
       - a Gradio update dict        → {"__type__": "update", "visible": True,
-                                        "value": [{...}, ...]}
+                                        "value": [...]}
       - an empty list / None when not yet done
+    Newer Gradio file dicts use "path" instead of "name".
     """
-    if isinstance(item, list):
-        return len(item) > 0
     if isinstance(item, dict):
-        val = item.get("value")
-        return isinstance(val, list) and len(val) > 0
-    return False
+        item = item.get("value")
+    if not isinstance(item, list):
+        return []
+    paths: list[str] = []
+    for entry in item:
+        if isinstance(entry, (list, tuple)) and entry:
+            entry = entry[0]
+        if isinstance(entry, dict):
+            entry = entry.get("name") or entry.get("path")
+        if isinstance(entry, str) and entry:
+            paths.append(entry)
+    return paths
+
+
+def _gallery_has_images(item) -> bool:
+    """Return True if a gallery output item contains at least one image."""
+    return bool(_gallery_image_paths(item))
 
 
 # ---------------------------------------------------------------------------

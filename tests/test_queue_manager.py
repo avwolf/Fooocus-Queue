@@ -203,3 +203,32 @@ def test_styles_round_trip_and_default_to_none(tmp_path):
     reloaded = QueueManager(qf)
     assert reloaded.get_entry("styled").styles == ["Fooocus V2", "Fooocus Masterpiece"]
     assert reloaded.get_entry("legacy").styles is None
+
+
+def test_training_fields_round_trip_and_default_empty(tmp_path):
+    qf = tmp_path / "queue.json"
+    qm = QueueManager(qf)
+    flagged = make_entry("flagged")
+    flagged.training_trigger = "mychar"
+    flagged.training_status = "pending"
+    qm.add(flagged)
+    qm.add(make_entry("legacy"))
+    qm.update_training_status("flagged", "copied")
+
+    reloaded = QueueManager(qf)
+    assert reloaded.get_entry("flagged").training_trigger == "mychar"
+    assert reloaded.get_entry("flagged").training_status == "copied"
+    assert reloaded.get_entry("legacy").training_trigger == ""
+    assert reloaded.get_entry("legacy").training_status == ""
+
+
+def test_legacy_json_without_training_keys_loads(tmp_path):
+    qf = tmp_path / "queue.json"
+    qf.write_text(json.dumps([{
+        "job_id": "old", "image_filename": "a.png", "uov_method": "Upscale (2x)",
+        "positive_prompt": "p", "seed": 1, "status": "done",
+        "submitted_at": "2026-03-04 12:00:00 UTC",
+    }]))
+    entry = QueueManager(qf).get_entry("old")
+    assert entry is not None
+    assert (entry.training_trigger, entry.training_status) == ("", "")

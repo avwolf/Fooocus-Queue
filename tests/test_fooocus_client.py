@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from fooocus_client import SubmittedJob, _fooocus_semaphore
+from fooocus_client import SubmittedJob, _fooocus_semaphore, _gallery_has_images, _gallery_image_paths
 
 
 def _make_job(job_id: str = "test-job") -> SubmittedJob:
@@ -62,3 +62,20 @@ class TestCancellation:
                 _fooocus_semaphore.release()
                 return  # semaphore is free — thread exited cleanly
         pytest.fail("Semaphore was not released after cancel within 2 s")
+
+
+@pytest.mark.parametrize("item, expected", [
+    ([{"name": "/tmp/gradio/a/x.png", "data": None, "is_file": True}], ["/tmp/gradio/a/x.png"]),
+    ([[{"name": "/tmp/gradio/a/x.png"}, None], [{"name": "/tmp/gradio/b/y.png"}, "cap"]],
+     ["/tmp/gradio/a/x.png", "/tmp/gradio/b/y.png"]),
+    ({"__type__": "update", "visible": True, "value": [{"name": "x.png"}]}, ["x.png"]),
+    ({"__type__": "update", "visible": False}, []),
+    ([{"path": "new/x.png"}], ["new/x.png"]),
+    (["plain/x.png"], ["plain/x.png"]),
+    ([{"data": "base64..."}], []),
+    (None, []),
+    ([], []),
+])
+def test_gallery_image_paths(item, expected):
+    assert _gallery_image_paths(item) == expected
+    assert _gallery_has_images(item) == bool(expected)

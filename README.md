@@ -63,6 +63,10 @@ QUEUE_FILE=queue.json
 
 `FOOOCUS_URL` and `QUEUE_FILE` can be left at their defaults in most cases.
 
+Optionally set `TRAINING_DIR` to choose where LoRA training images are collected (see
+*Add to the training set* below).  It defaults to a `training` folder inside
+`FOOOCUS_OUTPUTS_ROOT`, beside the dated output folders.
+
 ---
 
 ## Usage
@@ -120,7 +124,26 @@ whether they are inherited or overridden.  To change them, open the **Style** ta
 and tick/untick styles, **↺ Reset to original** to undo, or **Clear all** to send none.
 *Upscale (Fast 2x)* does not run diffusion, so styles have no effect on it.
 
-**7. Submit**
+**7. Add to the training set (optional)**
+
+To collect images for an SDXL LoRA, tick **Add to training set** in the *Training Set*
+section of the **Settings** tab and enter a **Trigger word**.  When a job submitted this
+way finishes, its result is copied to `<TRAINING_DIR>\<trigger word>\` as a
+full-resolution PNG (lossless, so retouching and re-saving doesn't degrade it), with a
+caption `.txt` of the same name beside it.  The queue table's *Training* column shows
+whether the copy succeeded.
+
+The caption is a first draft built from the positive prompt: the trigger word, then the
+prompt's tags with weights such as `(blue eyes:1.3)`, `__wildcards__` and `<lora:...>`
+tags removed and duplicates dropped.  Styles and Fooocus V2 expansion are not included.
+Expect to edit captions by hand, e.g. removing the traits the trigger word should learn.
+
+The checkbox and trigger word stay set between submissions, so you can queue a batch;
+unticking the box clears the trigger word.  **Add selected to training set** copies the
+selected gallery image straight away, without running a job.  Existing files are never
+overwritten — a name clash gets a `_1`, `_2`, … suffix.
+
+**8. Submit**
 
 Click **Submit for Upscaling**.  The job appears in the queue table with status
 `queued`.  It moves to `processing` when Fooocus starts generating and to `done` when

@@ -19,6 +19,8 @@ class QueueEntry:
     image_path: str = ""        # absolute path to source image; empty for legacy entries
     output_format: str = "png"  # Fooocus Output Format radio; png keeps old entries valid
     styles: list[str] | None = None  # Fooocus styles sent; None = inherit from log.html (legacy entries)
+    training_trigger: str = ""  # trigger word; "" = not flagged for the training set
+    training_status: str = ""   # "" | "pending" | "copied" | "copy failed"
 
 
 _TERMINAL_STATUSES = {"done", "failed", "cancelled", "submitted (previous session)"}
@@ -57,6 +59,13 @@ class QueueManager:
         for entry in self.entries:
             if entry.job_id == job_id:
                 entry.status = status
+                break
+        self._save()
+
+    def update_training_status(self, job_id: str, status: str) -> None:
+        for entry in self.entries:
+            if entry.job_id == job_id:
+                entry.training_status = status
                 break
         self._save()
 
